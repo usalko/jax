@@ -64,7 +64,7 @@ class CheckpointTest(jtu.JaxTestCase):
     ckpt_dir2 = pathlib.Path(self.create_tempdir('second').full_path)
 
     # Third GDA
-    def cb3(index):
+    def cb3(_):
       return np.array([])
     global_mesh1d = create_global_mesh((8,), ('x',))
     gda3 = GlobalDeviceArray.from_callback((0,), global_mesh1d, P(None), cb3)
@@ -73,9 +73,11 @@ class CheckpointTest(jtu.JaxTestCase):
     ckpt_paths = [str(ckpt_dir1), str(ckpt_dir2), str(ckpt_dir3)]
     tspecs = jax.tree_map(serialization.get_tensorstore_spec, ckpt_paths)
 
-    serialization.run_serialization([gda1, gda2, gda3], tspecs)
+    manager = serialization.AsyncCheckpointManager()
 
-    m1, m2, m3 = serialization.run_deserialization(
+    manager.run_serialization([gda1, gda2, gda3], tspecs)
+
+    m1, m2, m3 = manager.run_deserialization(
         [global_mesh, global_mesh, global_mesh1d],
         [mesh_axes, P('x'), P(None)],
         tspecs)
@@ -116,9 +118,11 @@ class CheckpointTest(jtu.JaxTestCase):
     ckpt_paths = [str(ckpt_dir1)]
     tspecs = jax.tree_map(serialization.get_tensorstore_spec, ckpt_paths)
 
-    serialization.run_serialization([gda1], tspecs)
+    manager = serialization.AsyncCheckpointManager()
 
-    m1, = serialization.run_deserialization(
+    manager.run_serialization([gda1], tspecs)
+
+    m1, = manager.run_deserialization(
         [create_global_mesh((4, 2), ('x', 'y'))],
         [P('x', 'y')],
         tspecs,
