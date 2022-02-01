@@ -82,6 +82,7 @@ from functools import partial
 from typing import (Any, Tuple)
 
 import numpy as np
+import numpy.typing as npt
 from jax import lax, core
 from jax._src.lib import xla_client as xc
 from jax._src import ad_util, dtypes
@@ -161,6 +162,46 @@ def approx_min_k(operand: Array,
       is_max_k=False,
       reduction_input_size_override=reduction_input_size_override,
       aggregate_to_topk=aggregate_to_topk)
+
+
+def ann_recall(result_neighbors: npt.NDArray,
+               ground_truth_neighbors: npt.NDArray) -> float:
+  """Computes the recall of an approximate nearest neighbor search.
+
+  Note, this is NOT a JAX-compatible op. This is a host function that only takes
+  numpy arrays as the inputs.
+
+  Args:
+    result_neighbors: int32 numpy array of the shape
+      [num_queries, neighbors_per_query] where the values are the indices of the
+      dataset.
+    ground_truth_neighbors: int32 numpy array of with shape
+      [num_queries, ground_truth_neighbors_per_query] where the values are the
+      indices of the dataset.
+
+  Example:
+    # shape [num_queries, 100]
+    ground_truth_neighbors = ...  # pre-computed top 100 sorted neighbors
+    # shape [num_queries, 200]
+    result_neighbors = ...  # Retrieves 200 neighbors from some ann algorithms.
+
+    # Computes the recall with k = 100
+    ann_recall(result_neighbors, ground_truth_neighbors)
+
+    # Computes the recall with k = 10
+    ann_recall(result_neighbors, ground_truth_neighbors[:,0:10])
+
+  Returns:
+    The recall.
+  """
+  assert len(result_neighbors.shape) == 2, 'shape = [num_queries, neighbors_per_query]'
+  assert len(ground_truth_neighbors.shape) == 2, 'shape = [num_queries, ground_truth_neighbors_per_query]'
+  assert result_neighbors.shape[0] == ground_truth_neighbors.shape[0]
+  gt_sets = [set(np.asarray(x)) for x in ground_truth_neighbors]
+  hits = sum(
+      len(list(x for x in nn_per_q if x.item() in gt_sets[q]))
+      for q, nn_per_q in enumerate(result_neighbors))
+  return hits / ground_truth_neighbors.size
 
 
 def _approx_top_k_abstract_eval(operand, *, k, reduction_dimension,
