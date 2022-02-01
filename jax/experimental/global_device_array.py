@@ -55,10 +55,6 @@ def _get_indices(global_shape: Shape, global_mesh: pxla.Mesh,
   sharding_spec = pxla.mesh_sharding_specs(
       global_mesh.shape, global_mesh.axis_names)(aval, array_mapping)
   indices = pxla.spec_to_indices(global_shape, sharding_spec)
-  for index in indices:
-    assert isinstance(index, tuple)
-    for idx in index:
-      assert isinstance(idx, slice)
   return indices
 
 
