@@ -224,6 +224,19 @@ class SPMDTestMixin:
     jtu.restore_spmd_lowering_flag()
 
 
+class ManualSPMDTestMixin:
+  def setUp(self):
+    if jtu.device_under_test() not in ['tpu', 'gpu']:
+      raise SkipTest
+    super().setUp()
+    jtu.set_spmd_lowering_flag(True)
+    jtu.set_spmd_manual_lowering_flag(True)
+
+  def tearDown(self):
+    jtu.restore_spmd_manual_lowering_flag()
+    jtu.restore_spmd_lowering_flag()
+
+
 class XMapTest(XMapTestCase):
 
   def testBasic(self):
@@ -667,6 +680,15 @@ class XMapTestSPMD(SPMDTestMixin, XMapTest):
       f(x)
     finally:
       config.update("experimental_xmap_ensure_fixed_sharding", False)
+
+
+class XMapTestManualSPMD(ManualSPMDTestMixin, XMapTestCase):
+  @jtu.with_mesh([('x', 2)])
+  def testBasic(self):
+    f = lambda x: jnp.sin(jnp.cos(x) + x) * x
+    fx = xmap(f, in_axes=['i'], out_axes=['i'], axis_resources={'i': 'x'})
+    x = jnp.arange(20, dtype=jnp.float32)
+    self.assertAllClose(fx(x), f(x))
 
 
 class NamedNumPyTest(XMapTestCase):
