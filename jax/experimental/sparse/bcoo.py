@@ -732,6 +732,21 @@ def _bcoo_dot_general_cuda_translation_rule(
   else:
     raise ValueError(f"lhs has to be 1d or 2d; get {props.n_sparse}d.")
 
+def _bcoo_sort_row_indices_impl(data, indices, n_sparse):
+    if n_sparse == 2:
+      indices_row, indices_col, data = lax.sort(
+        [indices[:, 0], indices[:, 1], data])
+      indices = jnp.column_stack((indices_row, indices_col))
+    elif n_sparse == 1:
+      indices, data = lax.sort([indices.flatten(), data])
+      indices = indices.reshape((indices.shape[0], 1))
+    else:
+      raise ValueError(f"lhs has to be 1d or 2d; get {n_sparse}d.")
+    return data, indices
+
+_bcoo_sort_row_indices = xla.lower_fun(
+    _bcoo_sort_row_indices_impl, multiple_results=True, new_style=True)
+
 def _bcoo_dot_general_gpu_translation_rule(
     ctx, avals_in, avals_out, lhs_data, lhs_indices, rhs, *, dimension_numbers,
     lhs_spinfo: BCOOInfo):
@@ -757,10 +772,10 @@ def _bcoo_dot_general_gpu_translation_rule(
       ctx, avals_in, avals_out, lhs_data, lhs_indices, rhs,
       dimension_numbers=dimension_numbers, lhs_spinfo=lhs_spinfo)
   else:
-    # The lhs indices are row-wise sorted.
-    lhs_indices_row, lhs_indices_col, lhs_data = lax.sort(
-        [lhs_indices[:, 0], lhs_indices[:, 1], lhs_data])
-    lhs_indices = jnp.hstack((lhs_indices_row, lhs_indices_col))
+    # Sorts lhs by row indices.
+    lhs_data, lhs_indices = _bcoo_sort_row_indices(
+        ctx, avals_in[:2], avals_in[:2], lhs_data, lhs_indices, n_sparse=n_sparse)
+
     return _bcoo_dot_general_cuda_translation_rule(
       ctx, avals_in, avals_out, lhs_data, lhs_indices, rhs,
       dimension_numbers=dimension_numbers, lhs_spinfo=lhs_spinfo)
