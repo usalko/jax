@@ -98,11 +98,15 @@ _dtype = partial(dtypes.dtype, canonicalize=True)
 AxisName = Any
 
 # These TypeVars are used below to express the fact that function types
-# (i.e. call signatures) are invariant under the jit, vmap, and pmap
-# transformations.
+# (i.e. call signatures) are invariant under the vmap, jit & pmap transforms.
+#
+# On Feb 2022, we disabled it for `jit` and `pmap`, because if we do
+# jit(f: F, ...) -> F, pytype fails on e.g. jax.jit(lambda x: x+1).lower(...)
+# because `lower` is an additional attribute.
+#
 # Note that the function type annotations will generally not strictly hold
-# in JIT internals, as Tracer values are passed through the function.
-# Should this raise any type errors for the tracing code in future, we can disable
+# in JIT internals, as Tracer values are passed through the function. Should
+# this raise any type errors for the tracing code in future, we can disable
 # type checking in parts of the tracing code, or remove these annotations.
 F = TypeVar("F", bound=Callable)
 T = TypeVar("T")
@@ -233,7 +237,7 @@ def jit(
   backend: Optional[str] = None,
   donate_argnums: Union[int, Iterable[int]] = (),
   inline: bool = False,
-) -> F:
+) -> Any:
   """Sets up ``fun`` for just-in-time compilation with XLA.
 
   Args:
@@ -396,7 +400,7 @@ def _cpp_jit(
     backend: Optional[str] = None,
     donate_argnums: Union[int, Iterable[int]] = (),
     inline: bool = False,
-) -> F:
+) -> Any:
   # An implementation of `jit` that tries to do as much as possible in C++.
   # The goal of this function is to speed up the time it takes to process the
   # arguments, find the correct C++ executable, start the transfer of arguments
@@ -1628,7 +1632,7 @@ def pmap(
   axis_size: Optional[int] = None,
   donate_argnums: Union[int, Iterable[int]] = (),
   global_arg_shapes: Optional[Tuple[Tuple[int, ...], ...]] = None,
-) -> F:
+) -> Any:
   """Parallel map with support for collective operations.
 
   The purpose of :py:func:`pmap` is to express single-program multiple-data
@@ -2073,7 +2077,7 @@ def _cpp_pmap(
     axis_size: Optional[int] = None,
     donate_argnums: Union[int, Iterable[int]] = (),
     global_arg_shapes: Optional[Tuple[Tuple[int, ...], ...]] = None,
-) -> F:
+) -> Any:
   axis_name, static_broadcasted_tuple, donate_tuple = _shared_code_pmap(
       fun, axis_name, static_broadcasted_argnums, donate_argnums, in_axes,
       out_axes)
