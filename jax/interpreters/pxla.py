@@ -1757,7 +1757,6 @@ def _mhlo_unshard(aval, axis_env, out_axis, xs, platform):
     if convert_bool:
       float_zero = mlir.full_like_aval(0, padded_aval)
       out = mhlo.CompareOp(
-          mlir.aval_to_ir_type(padded_aval.update(dtype=np.dtype(np.bool_))),
           out, float_zero, ir.StringAttr.get("NE"),
           ir.StringAttr.get("FLOAT")).result
     return out

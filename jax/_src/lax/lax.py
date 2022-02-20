@@ -1566,7 +1566,6 @@ def _sign_lower_mhlo(ctx, x):
   if dtypes.issubdtype(x_aval.dtype, np.unsignedinteger):
     return mhlo.SelectOp(
         mhlo.CompareOp(
-            mlir.aval_to_ir_type(x_aval.update(dtype=np.dtype(np.bool_))),
             x, mlir.full_like_aval(0, x_aval), ir.StringAttr.get("EQ"),
             ir.StringAttr.get("UNSIGNED")).result,
         mlir.full_like_aval(0, x_aval),
@@ -2201,8 +2200,7 @@ def _compare_lower_mhlo(direction: str, ctx, x, y):
     compare_type = "SIGNED"
   else:
     compare_type = "UNSIGNED"
-  return mhlo.CompareOp(mlir.aval_to_ir_type(aval_out), x, y,
-                        ir.StringAttr.get(direction),
+  return mhlo.CompareOp(x, y, ir.StringAttr.get(direction),
                         ir.StringAttr.get(compare_type)).results
 
 eq_p = naryop(_fixed_dtype(np.bool_), [_any, _any], 'eq')
@@ -3325,8 +3323,6 @@ def _select_mhlo_lowering(ctx, which, *cases):
     if len(cases) == 1: return cases
     return mhlo.SelectOp(which, cases[1], cases[0]).results
 
-  bool_shape = ir.RankedTensorType.get(which_aval.shape,
-                                       ir.IntegerType.get_signless(1))
   if dtypes.issubdtype(which_aval.dtype, np.signedinteger):
     compare_type = ir.StringAttr.get("SIGNED")
   else:
@@ -3338,9 +3334,8 @@ def _select_mhlo_lowering(ctx, which, *cases):
     if len(cases) == 1:
       return cases[0]
     mid = len(cases) // 2
-    pred = mhlo.CompareOp(
-      bool_shape, which, mlir.full_like_aval(offset + mid, which_aval),
-      lt, compare_type)
+    pred = mhlo.CompareOp(which, mlir.full_like_aval(offset + mid, which_aval),
+                          lt, compare_type)
     return mhlo.SelectOp(pred, _select(offset, cases[:mid]),
                          _select(offset + mid, cases[mid:])).result
 
