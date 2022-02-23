@@ -624,7 +624,7 @@ def _pjit_lower(
   in_is_gda = [ips == maps._PositionalSemantics.GLOBAL
                for ips in in_positional_semantics]
   return pxla.lower_mesh_computation(
-      fun, name, resource_env.physical_mesh,
+      fun, f'pjit({name})', resource_env.physical_mesh,
       in_axes, out_axes, donated_invars,
       True, jaxpr.in_avals, tiling_method=None, in_is_gda=in_is_gda)
 

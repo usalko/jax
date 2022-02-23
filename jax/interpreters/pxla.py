@@ -2144,7 +2144,7 @@ def lower_mesh_computation(
     in_is_gda: Sequence[bool]):
   assert not mesh.empty
   backend = xb.get_device_backend(mesh.devices.flat[0])
-  name_stack = extend_name_stack(wrap_name(transformed_name, 'xmap'))
+  name_stack = extend_name_stack(transformed_name)
 
   global_axis_sizes = mesh.shape
 
@@ -2220,7 +2220,7 @@ def lower_mesh_computation(
     axis_ctx = mlir.ReplicaAxisContext(axis_env)
   closed_jaxpr = core.ClosedJaxpr(jaxpr, consts)
   module: Union[str, xc.XlaComputation]
-  module_name = f"xmap_{fun.__name__}"
+  module_name = f"{transformed_name.split('(')[0]}_{fun.__name__}"
   with core.extend_axis_env_nd(mesh.shape.items()):
     if config.jax_enable_mlir:
       module = mlir.lower_jaxpr_to_module(
