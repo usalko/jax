@@ -18,6 +18,7 @@ import re
 from typing import Callable
 
 import jax
+from jax import tree_util
 from jax._src.util import prod
 from jax.experimental import global_device_array as gda
 from jax.experimental.maps import Mesh
@@ -64,6 +65,13 @@ def _get_metadata(gda):
   }
 
 
+def _spec_has_metadata(tree):
+  if not isinstance(tree, dict):
+    return False
+  return 'metadata' in tree or any(
+      _spec_has_metadata(subtree) for _, subtree in tree.items())
+
+
 def get_tensorstore_spec(ckpt_path: str):
   spec = {'driver': 'zarr', 'kvstore': {}}
 
@@ -82,7 +90,9 @@ def get_tensorstore_spec(ckpt_path: str):
 
 
 async def async_serialize(gda_inp: gda.GlobalDeviceArray, tensorstore_spec):
-  if not tensorstore_spec.get('metadata'):
+  # 'metadata' may not be present at the top level (for example, if we are using
+  # a 'cast' driver).
+  if not _spec_has_metadata(tensorstore_spec):
     tensorstore_spec['metadata'] = _get_metadata(gda_inp)
 
   t = await ts.open(
