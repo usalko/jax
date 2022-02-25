@@ -15,7 +15,7 @@
 from enum import IntEnum
 import numpy as np
 from collections import OrderedDict, Counter
-from typing import Callable, Sequence, Tuple, Union, Optional
+from typing import Callable, Sequence, Tuple, Union, Optional, List
 import itertools as it
 from functools import partial
 
@@ -58,6 +58,9 @@ def _is_from_gda(x):
   # pickling in_axis_resources and sending to other processes). Make sure this
   # doesn't cause an error to avoid user confusion.
   return isinstance(x, type(FROM_GDA))
+
+AUTO = pxla.AUTO
+_is_auto = pxla._is_auto
 
 
 # TODO(yashkatariya): Add pjit microbenchmarks.
@@ -235,17 +238,23 @@ def pjit(fun: Callable,
     local_in_avals = tuple(shaped_abstractify(a) for a in args_flat)
     # TODO(yashkatariya): This is a hack. This should go away when avals have
     # is_global attribute.
+    # `ShapedArray` is not an allowed value if calling pjit directly. But it is
+    # allowed if you use `f_pjitted.lower(*args)`. If a `ShapedArray` is an
+    # input, consider it as global.
     in_positional_semantics = tuple(
-        maps._PositionalSemantics.GLOBAL if isinstance(a, GDA) else maps._positional_semantics.val
+        maps._PositionalSemantics.GLOBAL if isinstance(a, GDA) or
+        isinstance(a, core.ShapedArray) else maps._positional_semantics.val
         for a in args_flat)
     out_positional_semantics = maps._positional_semantics.val
 
     global_in_avals, canonicalized_in_axis_resources_flat = _process_in_axis_resources(
         mesh, local_in_avals, hashable_pytree(in_axis_resources), in_tree,
         in_positional_semantics, tuple(isinstance(a, GDA) for a in args_flat))
+
     jaxpr, canonicalized_out_axis_resources_flat = _pjit_jaxpr(
         flat_fun, mesh, global_in_avals, HashableFunction(out_tree, closure=()),
         hashable_pytree(out_axis_resources))
+
     canonicalized_in_axis_resources_flat = tree_map(
         _maybe_replace_from_gda_with_pspec,
         canonicalized_in_axis_resources_flat, tuple(args_flat))
@@ -376,8 +385,10 @@ def _process_in_axis_resources(mesh, local_in_avals, in_axis_resources_thunk,
   # replicated.
   # Use canonicalized in_axis_resources here because we want to treat P(None)
   # and None (for example) as equivalent.
-  if all(((not _is_from_gda(p) and p.partitions == ()) or ig)
-         for p, ig in safe_zip(canonicalized_in_axis_resources_flat, is_gda)):
+  if all(
+      ((not _is_from_gda(p) and not _is_auto(p) and p.partitions == ()) or
+       ips == maps._PositionalSemantics.GLOBAL)
+      for p, ips in safe_zip(canonicalized_in_axis_resources_flat, in_positional_semantics)):
     # Shapes should be checked against non canonicalized in_axis_resources.
     # For example, partitions of () and ((),) are not equivalent, since the
     # first one is a valid spec for a scalar value, while the second is not!
@@ -537,7 +548,8 @@ def _prepare_axis_resources(axis_resources,
   entries, treedef = tree_flatten(axis_resources, is_leaf=lambda x: x is None)
   what = f"{arg_name} leaf specifications"
   entries = [
-      entry if _is_from_gda(entry) else ParsedPartitionSpec.from_user_input(
+      entry if _is_from_gda(entry) or _is_auto(entry) else
+      ParsedPartitionSpec.from_user_input(
           entry, what, allow_unconstrained_dims=allow_unconstrained_dims)
       for entry in entries
   ]
@@ -553,6 +565,7 @@ def _check_unique_resources(axis_resources, arg_name):
   for arg_axis_resources in axis_resources:
     if not arg_axis_resources: continue
     if _is_from_gda(arg_axis_resources): continue
+    if _is_auto(arg_axis_resources): continue
     constrained_dims = [d for d in arg_axis_resources if d is not None]
     resource_counts = Counter(it.chain.from_iterable(constrained_dims))
     if not resource_counts: continue
@@ -569,6 +582,8 @@ def _check_shapes_against_resources(what: str, is_global_shape: bool,
   global_str = " global" if is_global_shape else ""
   for aval, aval_axis_resources in zip(flat_avals, flat_axis_resources):
     if _is_from_gda(aval_axis_resources):
+      continue
+    if _is_auto(aval_axis_resources):
       continue
     shape = aval.shape
     if len(shape) < len(aval_axis_resources):
@@ -605,6 +620,11 @@ def _pjit_call_impl(*args, jaxpr,
   compiled = _pjit_lower(
       jaxpr, in_axis_resources, out_axis_resources,
       resource_env, donated_invars, name, in_is_global).compile()
+  # Check the GDA sharding and the sharding returned by the auto spmd partitoner
+  # only if auto_spmd_lowering is enabled.
+  if compiled._auto_spmd_lowering:
+    in_pspec, _ = _get_sharding_from_executable(compiled.xla_executable, resource_env.physical_mesh)
+    _check_gda_xla_sharding_match(args, in_pspec)
   distributed_debug_log(("Running pjit'd function", name),
                         ("mesh", resource_env.physical_mesh))
   return compiled.unsafe_call(*args)
@@ -1022,6 +1042,8 @@ pxla.custom_resource_typing_rules[sharding_constraint_p] = \
 # -------------------- helpers --------------------
 
 def get_array_mapping(axis_resources: ParsedPartitionSpec) -> pxla.ArrayMapping:
+  if _is_auto(axis_resources):
+    return axis_resources
   return OrderedDict((axis, i)
                      for i, axes in enumerate(axis_resources)
                      if axes is not None for axis in axes)
@@ -1069,18 +1091,37 @@ def _calc_is_global_sequence(in_positional_semantics, in_axis_resources):
       ips == maps._PositionalSemantics.GLOBAL or p.partitions == ()
       for ips, p in safe_zip(in_positional_semantics, in_axis_resources))
 
+def _check_gda_xla_sharding_match(args, in_pspec):
+  for arg, ip in safe_zip(args, in_pspec):
+    if isinstance(arg, GDA):
+      gda_cpspec = CanonicalizedParsedPartitionSpec(
+        ParsedPartitionSpec.from_user_input(
+            arg.mesh_axes, arg_name="GDA mesh_axes"))
+      in_cpspec = CanonicalizedParsedPartitionSpec(
+          ParsedPartitionSpec.from_user_input(ip, arg_name="auto sharding pspec"))
+      if in_cpspec != gda_cpspec:
+        raise ValueError(
+            "GDA sharding does not match the sharding returned by auto spmd "
+            "partitioner. Did you create the GDA with the input sharding "
+            "returned by `pjit.get_sharding_from_xla`? "
+            "If yes, please file a bug. "
+            f"Got GDA spec: {gda_cpspec.user_spec} and "
+            f"auto sharding spec: {in_cpspec.user_spec} for GDA: {arg}")
 
 def _create_cpspec(x):
-  return x if _is_from_gda(x) else CanonicalizedParsedPartitionSpec(x)
+  return x if _is_from_gda(x) or _is_auto(x) else CanonicalizedParsedPartitionSpec(x)
 
 def _maybe_replace_from_gda_with_pspec(
     in_axis_resources_flat: CanonicalizedParsedPartitionSpec, arg) -> CanonicalizedParsedPartitionSpec:
   if isinstance(arg, GDA):
+    if _is_auto(in_axis_resources_flat):
+      return in_axis_resources_flat
     gda_cpspec = CanonicalizedParsedPartitionSpec(
         ParsedPartitionSpec.from_user_input(
             arg.mesh_axes, arg_name="GDA mesh_axes"))
     assert type(gda_cpspec) is CanonicalizedParsedPartitionSpec
     if (not _is_from_gda(in_axis_resources_flat) and
+        not _is_auto(in_axis_resources_flat) and
         in_axis_resources_flat != gda_cpspec):
       raise ValueError(
           'Got an input GDA to pjit with different partitioning than specified in '
@@ -1227,3 +1268,35 @@ def parse_op_sharding(op_sharding, mesh):
     return ParsedPartitionSpec('<internally generated spec>', partitions)
   else:
     raise AssertionError("Unhandled OpSharding type. Please open a bug report!")
+
+
+def _get_partition_spec(ppspec: ParsedPartitionSpec) -> Sequence[PartitionSpec]:
+  if isinstance(ppspec, list):
+    return [pxla.array_mapping_to_axis_resources(get_array_mapping(p))
+            for p in ppspec]
+  else:
+    return [pxla.array_mapping_to_axis_resources(get_array_mapping(ppspec))]
+
+def _get_sharding_from_executable(executable, mesh: pxla.Mesh):
+  output_op_sharding = executable.hlo_modules()[0].spmd_output_sharding
+  input_op_shardings = executable.hlo_modules()[0].spmd_parameters_shardings
+
+  out_ppspec = parse_op_sharding(output_op_sharding, mesh)
+  out_partition_spec = _get_partition_spec(out_ppspec)
+
+  in_partition_spec: List[PartitionSpec] = []
+  for sharding in input_op_shardings:
+    in_ppspec = parse_op_sharding(sharding, mesh)
+    in_partition_spec.extend(_get_partition_spec(in_ppspec))
+
+  return tuple(in_partition_spec), tuple(out_partition_spec)
+
+def get_sharding_from_compiled(compiled: stages.Compiled, mesh: pxla.Mesh):
+  return _get_sharding_from_executable(compiled.runtime_executable(), mesh)
+
+def get_sharding_from_xla(pjitted_fn, mesh, global_shapes, dtypes):
+  # TODO(yashkatariya): Check if the pjitted_fn comes from pjit.
+  inputs = [core.ShapedArray(s, d) for s, d in safe_zip(global_shapes, dtypes)]
+  compiled = pjitted_fn.lower(*inputs).compile()
+  in_sharding, out_sharding = get_sharding_from_compiled(compiled, mesh)
+  return in_sharding, out_sharding

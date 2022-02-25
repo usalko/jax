@@ -413,7 +413,7 @@ that would mean that a flat list of chunks would get assigned to a flattened lis
 mesh devices without any modifications. If the mapping was {'y': 1, 'x': 1}, then the
 mesh devices ndarray would have to be transposed before flattening and assignment.
 """
-ArrayMapping = OrderedDictType[MeshAxisName, int]
+ArrayMapping = Union[OrderedDictType[MeshAxisName, int], Any]
 
 
 def array_mapping_to_axis_resources(array_mapping: ArrayMapping):
@@ -2135,6 +2135,14 @@ class TileManual:
 TilingMethod = Union[TileVectorize, TileManual]
 
 
+class _AUTOAxisResource:
+  pass
+AUTO = _AUTOAxisResource()
+
+def _is_auto(x):
+  return isinstance(x, type(AUTO))
+
+
 @profiler.annotate_function
 def lower_mesh_computation(
     fun: lu.WrappedFun,
@@ -2151,6 +2159,15 @@ def lower_mesh_computation(
   assert not mesh.empty
   backend = xb.get_device_backend(mesh.devices.flat[0])
   name_stack = new_name_stack(wrap_name(fun_name, api_name))
+
+  auto_spmd_lowering = (all(_is_auto(i) for i in in_axes) and
+                        all(_is_auto(o) for o in out_axes) and spmd_lowering)
+  # If auto spmd is enabled, use a fully replicated dummy sharding. This does
+  # not matter because the XLA auto sharding pass will override this sharding
+  # to what it calculates.
+  if auto_spmd_lowering:
+    in_axes = [{} for _ in in_axes]
+    out_axes = [{} for _ in out_axes]
 
   global_axis_sizes = mesh.shape
 
@@ -2243,7 +2260,8 @@ def lower_mesh_computation(
   return MeshComputation(
       str(name_stack), module, donated_invars, mesh=mesh, global_in_avals=global_in_avals,
       global_out_avals=global_out_avals, in_axes=in_axes, out_axes=out_axes,
-      spmd_lowering=spmd_lowering, tuple_args=tuple_args, in_is_global=in_is_global)
+      spmd_lowering=spmd_lowering, tuple_args=tuple_args, in_is_global=in_is_global,
+      auto_spmd_lowering=auto_spmd_lowering)
 
 
 class MeshComputation:
@@ -2313,15 +2331,24 @@ def _get_input_metadata(global_in_avals, global_mesh, in_axes, in_is_global):
   return input_specs, input_indices, input_avals
 
 
-class MeshExecutable:
-  __slots__ = ['xla_executable', 'unsafe_call', '_input_avals']
+def _get_array_mapping_from_executable(xla_executable, mesh):
+  from jax.experimental import pjit, global_device_array
+  in_pspec, out_pspec = pjit._get_sharding_from_executable(xla_executable, mesh)
+  in_axes = [global_device_array._get_array_mapping(ip) for ip in in_pspec]
+  out_axes = [global_device_array._get_array_mapping(op) for op in out_pspec]
+  return in_axes, out_axes
 
-  def __init__(self, xla_executable, unsafe_call, input_avals):
+
+class MeshExecutable:
+  __slots__ = ['xla_executable', 'unsafe_call', '_input_avals', '_auto_spmd_lowering']
+
+  def __init__(self, xla_executable, unsafe_call, input_avals, auto_spmd_lowering):
     self.xla_executable = xla_executable
     self.unsafe_call = unsafe_call
     # input_avals is a list of global and local avals. Aval is global if input
     # is a GDA else local.
     self._input_avals = input_avals
+    self._auto_spmd_lowering = auto_spmd_lowering
 
   @staticmethod
   def from_hlo(name: str,
@@ -2333,6 +2360,7 @@ class MeshExecutable:
                out_axes: Sequence[ArrayMapping],
                spmd_lowering: bool, tuple_args: bool,
                in_is_global: Sequence[bool],
+               auto_spmd_lowering: bool,
                _allow_propagation_to_outputs: bool,
                _allow_compile_replicated: bool) -> 'MeshExecutable':
     assert not mesh.empty
@@ -2348,18 +2376,18 @@ class MeshExecutable:
         num_partitions=num_partitions,
         device_assignment=device_assignment,
         use_spmd_partitioning=spmd_lowering,
+        use_auto_spmd_partitioning=auto_spmd_lowering,
     )
     compile_options.parameter_is_tupled_arguments = tuple_args
     compile_options.executable_build_options.allow_spmd_sharding_propagation_to_output = \
         _allow_propagation_to_outputs
 
-    input_specs, input_indices, input_avals = _get_input_metadata(
-        global_in_avals, mesh, in_axes, in_is_global)
-    # Calculate local information here instead of calculating it in
-    # `avals_to_results_handler` because pmap also uses this function.
-    handle_outs = global_avals_to_results_handler(global_out_avals, out_axes, mesh)
-
     if _allow_compile_replicated and hasattr(backend, "compile_replicated"):
+      input_specs, input_indices, input_avals = _get_input_metadata(
+        global_in_avals, mesh, in_axes, in_is_global)
+      # Calculate local information here instead of calculating it in
+      # `avals_to_results_handler` because pmap also uses this function.
+      handle_outs = global_avals_to_results_handler(global_out_avals, out_axes, mesh)
       unsafe_call = backend.compile_replicated(
           computation, compile_options,
           input_indices, input_specs,
@@ -2369,10 +2397,19 @@ class MeshExecutable:
       with dispatch.log_elapsed_time(f"Finished XLA compilation of {name} "
                                      "in {elapsed_time} sec"):
         xla_executable = dispatch.compile_or_get_cached(backend, computation, compile_options)
+
+      if auto_spmd_lowering:
+        in_axes, out_axes = _get_array_mapping_from_executable(xla_executable, mesh)
+
+      input_specs, input_indices, input_avals = _get_input_metadata(
+        global_in_avals, mesh, in_axes, in_is_global)
+      # Calculate local information here instead of calculating it in
+      # `avals_to_results_handler` because pmap also uses this function.
+      handle_outs = global_avals_to_results_handler(global_out_avals, out_axes, mesh)
       handle_args = InputsHandler(xla_executable.local_devices(), input_specs, input_indices)
       unsafe_call = ExecuteReplicated(xla_executable, backend, handle_args, handle_outs)
 
-    return MeshExecutable(xla_executable, unsafe_call, input_avals)
+    return MeshExecutable(xla_executable, unsafe_call, input_avals, auto_spmd_lowering)
 
   def call(self, *args):
     # TODO(yashkatariya): Add a AOT lowering test where GDA is an input.
