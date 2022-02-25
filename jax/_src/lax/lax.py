@@ -1053,6 +1053,126 @@ def top_k(operand: Array, k: int) -> Tuple[Array, Array]:
     raise ValueError("k argument to top_k must be nonnegative, got {}".format(k))
   return top_k_p.bind(operand, k=k)
 
+def approx_max_k(operand: Array,
+                 k: int,
+                 reduction_dimension: int = -1,
+                 recall_target: float = 0.95,
+                 reduction_input_size_override: int = -1,
+                 aggregate_to_topk: bool = True) -> Tuple[Array, Array]:
+  """Returns max ``k`` values and their indices of the ``operand`` in an approximate manner.
+
+  Args:
+    operand : Array to search for max-k.
+    k : Specifies the number of max-k.
+    reduction_dimension : Integer dimension along which to search. Default: -1.
+    recall_target : Recall target for the approximation.
+    reduction_input_size_override : When set to a positive value, it overrides
+      the size determined by operands[reduction_dim] for evaluating the recall.
+      This option is useful when the given operand is only a subset of the
+      overall computation in SPMD or distributed pipelines, where the true input
+      size cannot be deferred by the operand shape.
+    aggregate_to_topk : When true, aggregates approximate results to top-k. When
+      false, returns the approximate results. The number of the approximate
+      results is implementation defined and is greater equals to the specified
+      k.
+
+  Returns:
+    Tuple[Array, Array] : The two arrays are the max k values and the
+      corresponding indices along the reduction_dimension of the input operand.
+      The arrays' dimensions are the same as the input operand except for the
+      reduction_dimension: when aggregate_to_topk is true, the reduction
+      dimension is k; otherwise, it is greater equals to k where the size is
+      implementation-defined.
+
+  We encourage users to wrap the approx_*_k with jit. See the following example
+  for maximal inner production search (MIPS):
+
+  >>> import functools
+  >>> import jax
+  >>> import numpy as np
+  >>> @functools.partial(jax.jit, static_argnames=["k", "recall_target"])
+  ... def mips(qy, db, k=10, recall_target=0.95):
+  ...   dists = jax.lax.dot(qy, db.transpose())
+  ...   # returns (f32[qy_size, k], i32[qy_size, k])
+  ...   return jax.lax.approx_max_k(dists, k=k, recall_target=recall_target)
+  >>>
+  >>> qy = jax.numpy.array(np.random.rand(50, 64))
+  >>> db = jax.numpy.array(np.random.rand(1024, 64))
+  >>> dot_products, neighbors = mips(qy, db, k=10)
+  """
+  if jax._src.lib._xla_extension_version < 45:
+    aggregate_to_topk = True
+  return approx_top_k_p.bind(
+      operand,
+      k=k,
+      reduction_dimension=reduction_dimension,
+      recall_target=recall_target,
+      is_max_k=True,
+      reduction_input_size_override=reduction_input_size_override,
+      aggregate_to_topk=aggregate_to_topk)
+
+def approx_min_k(operand: Array,
+                 k: int,
+                 reduction_dimension: int = -1,
+                 recall_target: float = 0.95,
+                 reduction_input_size_override: int = -1,
+                 aggregate_to_topk: bool = True) -> Tuple[Array, Array]:
+  """Returns min ``k`` values and their indices of the ``operand`` in an approximate manner.
+
+  Args:
+    operand : Array to search for min-k.
+    k : Specifies the number of min-k.
+    reduction_dimension: Integer dimension along which to search. Default: -1.
+    recall_target: Recall target for the approximation.
+    reduction_input_size_override : When set to a positive value, it overrides
+      the size determined by operands[reduction_dim] for evaluating the recall.
+      This option is useful when the given operand is only a subset of the
+      overall computation in SPMD or distributed pipelines, where the true input
+      size cannot be deferred by the operand shape.
+    aggregate_to_topk: When true, aggregates approximate results to top-k. When
+      false, returns the approximate results. The number of the approximate
+      results is implementation defined and is greater equals to the specified
+      k.
+
+  Returns:
+    Tuple[Array, Array] : The two arrays are the least k values and the
+      corresponding indices along the reduction_dimension of the input operand.
+      The arrays' dimensions are the same as the input operand except for the
+      reduction_dimension: when aggregate_to_topk is true, the reduction
+      dimension is k; otherwise, it is greater equals to k where the size is
+      implementation-defined.
+
+  We encourage users to wrap the approx_*_k with jit. See the following example
+  for nearest neighbor search over the squared l2 distance:
+
+  >>> import functools
+  >>> import jax
+  >>> import numpy as np
+  >>> @functools.partial(jax.jit, static_argnames=["k", "recall_target"])
+  ... def l2_ann(qy, db, half_db_norms, k=10, recall_target=0.95):
+  ...   dists = half_db_norms - jax.lax.dot(qy, db.transpose())
+  ...   return jax.lax.approx_min_k(dists, k=k, recall_target=recall_target)
+  >>>
+  >>> qy = jax.numpy.array(np.random.rand(50, 64))
+  >>> db = jax.numpy.array(np.random.rand(1024, 64))
+  >>> half_db_norms = jax.numpy.linalg.norm(db, axis=1) / 2
+  >>> dists, neighbors = l2_ann(qy, db, half_db_norms, k=10)
+
+  We compute ``db_norms/2 - dot(qy, db^T)`` instead of
+  ``qy^2 - 2 dot(qy, db^T) + db^2`` for performance reason. The former uses less
+  arithmetics and produces the same set of neighbors.
+  """
+  if jax._src.lib._xla_extension_version < 45:
+    aggregate_to_topk = True
+  return approx_top_k_p.bind(
+      operand,
+      k=k,
+      reduction_dimension=reduction_dimension,
+      recall_target=recall_target,
+      is_max_k=False,
+      reduction_input_size_override=reduction_input_size_override,
+      aggregate_to_topk=aggregate_to_topk)
+
 def tie_in(x: Array, y: Array) -> Array:
   """Deprecated. Ignores ``x`` and returns ``y``."""
   return y
@@ -4045,6 +4165,175 @@ top_k_p.def_abstract_eval(_top_k_abstract_eval)
 xla.register_translation(top_k_p, _top_k_translation_rule)
 ad.primitive_jvps[top_k_p] = _top_k_jvp
 batching.primitive_batchers[top_k_p] = _top_k_batch_rule
+
+
+def _approx_top_k_abstract_eval(operand, *, k, reduction_dimension,
+                                recall_target, is_max_k,
+                                reduction_input_size_override,
+                                aggregate_to_topk):
+  if k <= 0:
+    raise ValueError('k must be positive, got {}'.format(k))
+  if len(operand.shape) == 0:
+    raise TypeError('approx_top_k operand must have >= 1 dimension, got {}'.format(
+        operand.shape))
+  dims = list(operand.shape)
+  if dims[reduction_dimension] < k:
+    raise ValueError(
+        'k must be smaller than the size of reduction_dim {}, got {}'.format(
+            dims[reduction_dimension], k))
+  if jax._src.lib._xla_extension_version >= 45:
+    reduction_input_size = dims[reduction_dimension]
+    dims[reduction_dimension] = xc.ops.ApproxTopKReductionOutputSize(
+        reduction_input_size, len(dims), k, recall_target, aggregate_to_topk,
+        reduction_input_size_override)[0]
+  else:
+    dims[reduction_dimension] = k
+  return (operand.update(
+      shape=dims, dtype=operand.dtype, weak_type=operand.weak_type),
+          operand.update(shape=dims, dtype=np.dtype(np.int32)))
+
+def _approx_top_k_comparator_builder(operand, op_type, is_max_k):
+  c = xc.XlaBuilder(
+      'top_k_{}_comparator'.format('gt' if is_max_k else 'lt'))
+  p0 = xla.parameter(c, 0, xc.Shape.scalar_shape(op_type))
+  p1 = xla.parameter(c, 1, xc.Shape.scalar_shape(op_type))
+  xla.parameter(c, 2, xc.Shape.scalar_shape(np.dtype(np.int32)))
+  xla.parameter(c, 3, xc.Shape.scalar_shape(np.dtype(np.int32)))
+  if is_max_k:
+    cmp_result = xc.ops.Gt(p0, p1)
+  else:
+    cmp_result = xc.ops.Lt(p0, p1)
+  return c.build(cmp_result)
+
+def _approx_top_k_tpu_translation(ctx, avals_in, avals_out, operand, *, k,
+                                  reduction_dimension, recall_target, is_max_k,
+                                  reduction_input_size_override,
+                                  aggregate_to_topk):
+  c = ctx.builder
+  op_shape = c.get_shape(operand)
+  if not op_shape.is_array():
+    raise ValueError('operand must be an array, but was {}'.format(op_shape))
+  op_dims = op_shape.dimensions()
+  op_type = op_shape.element_type()
+  if reduction_dimension < 0:
+    reduction_dimension = len(op_dims) + reduction_dimension
+  comparator = _approx_top_k_comparator_builder(operand, op_type, is_max_k)
+  if is_max_k:
+    if dtypes.issubdtype(op_type, np.floating):
+      init_literal = np.array(np.NINF, dtype=op_type)
+    else:
+      init_literal = np.iinfo(op_type).min()
+  else:
+    if dtypes.issubdtype(op_type, np.floating):
+      init_literal = np.array(np.Inf, dtype=op_type)
+    else:
+      init_literal = np.iinfo(op_type).max()
+  iota = xc.ops.Iota(c, xc.Shape.array_shape(np.dtype(np.int32), op_dims),
+                     reduction_dimension)
+  init_val = xc.ops.Constant(c, init_literal)
+  init_arg = xc.ops.Constant(c, np.int32(-1))
+  out = xc.ops.ApproxTopK(c, [operand, iota], [init_val, init_arg], k,
+                          reduction_dimension, comparator, recall_target,
+                          aggregate_to_topk, reduction_input_size_override)
+  return xla.xla_destructure(c, out)
+
+def _approx_top_k_fallback_translation(ctx, avals_in, avals_out, operand, *, k,
+                                       reduction_dimension, recall_target,
+                                       is_max_k, reduction_input_size_override,
+                                       aggregate_to_topk):
+  c = ctx.builder
+  op_shape = c.get_shape(operand)
+  if not op_shape.is_array():
+    raise ValueError('operand must be an array, but was {}'.format(op_shape))
+  op_dims = op_shape.dimensions()
+  op_type = op_shape.element_type()
+  if reduction_dimension < 0:
+    reduction_dimension = len(op_dims) + reduction_dimension
+  comparator = _approx_top_k_comparator_builder(operand, op_type, is_max_k)
+  iota = xc.ops.Iota(c, xc.Shape.array_shape(np.dtype(np.int32), op_dims),
+                     reduction_dimension)
+  val_arg = xc.ops.Sort(c, [operand, iota], comparator, reduction_dimension)
+  vals = xc.ops.GetTupleElement(val_arg, 0)
+  args = xc.ops.GetTupleElement(val_arg, 1)
+  sliced_vals = xc.ops.SliceInDim(vals, 0,
+                                  avals_out[0].shape[reduction_dimension], 1,
+                                  reduction_dimension)
+  sliced_args = xc.ops.SliceInDim(args, 0,
+                                  avals_out[0].shape[reduction_dimension], 1,
+                                  reduction_dimension)
+  return sliced_vals, sliced_args
+
+def _approx_top_k_batch_rule(batched_args, batch_dims, *, k,
+                             reduction_dimension, recall_target, is_max_k,
+                             reduction_input_size_override, aggregate_to_topk):
+  prototype_arg, new_bdim = next(
+      (a, b) for a, b in zip(batched_args, batch_dims) if b is not None)
+  new_args = []
+  for arg, bdim in zip(batched_args, batch_dims):
+    if bdim is None:
+      dims = np.delete(np.arange(prototype_arg.ndim), new_bdim)
+      new_args.append(broadcast_in_dim(arg, prototype_arg.shape, dims))
+    else:
+      new_args.append(batching.moveaxis(arg, bdim, new_bdim))
+  new_reduction_dim = reduction_dimension + (new_bdim <= reduction_dimension)
+  bdims = (new_bdim,) * len(new_args)
+  return (approx_top_k_p.bind(
+      *new_args,
+      k=k,
+      reduction_dimension=new_reduction_dim,
+      recall_target=recall_target,
+      is_max_k=False,
+      reduction_input_size_override=reduction_input_size_override,
+      aggregate_to_topk=aggregate_to_topk), bdims)
+
+# Slow jvp implementation using gather.
+#
+# TODO(fchern): Some optimization ideas
+# 1. ApproxTopK is internally a variadic reduce, so we can simply call
+#    ApproxTopK(operand, tangent, iota) for jvp.
+# 2. vjp cannot benefit from the algorithm above. We must run scatter to
+#    distribute the output cotangent to input cotangent. A reasonable way to do
+#    this is to run it on CPU or on sparse-core.
+def _approx_top_k_jvp(primals, tangents, *, k, reduction_dimension,
+                      recall_target, is_max_k, reduction_input_size_override,
+                      aggregate_to_topk):
+  operand, = primals
+  tangent, = tangents
+  if is_max_k:
+    val_out, arg_out = approx_max_k(operand, k, reduction_dimension,
+                                    recall_target,
+                                    reduction_input_size_override,
+                                    aggregate_to_topk)
+  else:
+    val_out, arg_out = approx_min_k(operand, k, reduction_dimension,
+                                    recall_target,
+                                    reduction_input_size_override,
+                                    aggregate_to_topk)
+  if type(tangent) is ad_util.Zero:
+    tangent_out = ad_util.Zero.from_value(val_out)
+  else:
+    arg_shape = arg_out.shape
+    rank = len(arg_shape)
+    if reduction_dimension < 0:
+      reduction_dimension += rank
+    iotas = [
+        broadcasted_iota(arg_out.dtype, arg_shape, i) for i in range(rank)
+    ]
+    idx = tuple(
+        arg_out if i == reduction_dimension else iotas[i] for i in range(rank))
+    tangent_out = tangent[idx]
+  return (val_out, arg_out), (tangent_out, ad_util.Zero.from_value(arg_out))
+
+approx_top_k_p = core.Primitive('approx_top_k')
+approx_top_k_p.multiple_results = True
+approx_top_k_p.def_impl(partial(xla.apply_primitive, approx_top_k_p))
+approx_top_k_p.def_abstract_eval(_approx_top_k_abstract_eval)
+xla.register_translation(approx_top_k_p, _approx_top_k_fallback_translation)
+xla.register_translation(approx_top_k_p, _approx_top_k_tpu_translation,
+                         platform='tpu')
+batching.primitive_batchers[approx_top_k_p] = _approx_top_k_batch_rule
+ad.primitive_jvps[approx_top_k_p] = _approx_top_k_jvp
+
 
 def _stop_gradient_jvp_rule(primals, tangents):
   # if we don't call stop_gradient here, we'd only peel off one autodiff tracer
