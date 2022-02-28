@@ -673,6 +673,11 @@ class PJitTest(jtu.BufferDonationTestCase):
     self.assertAllClose(actual.device_buffers[3].to_py(), splits[3],
                         check_dtypes=False)
 
+    self.assertTrue(exe._no_kwargs, True)
+    self.assertEqual(exe.in_tree, jax.tree_flatten((0, 0))[1])
+    self.assertEqual(exe.args_in_tree(), jax.tree_flatten((0, 0))[1])
+    self.assertEqual(exe.kwargs_in_tree(), jax.tree_flatten({})[1])
+
   @jtu.with_mesh([('x', 2), ('y', 2)])
   def testLowerCompileWithKwargs(self):
     @partial(pjit,

@@ -769,6 +769,12 @@ class CPPJitTest(jtu.BufferDonationTestCase):
     f_exe = f_low.compile()
     self.assertAllClose(f_exe(1.), 2.)
 
+    # It's a pair of: (positional args, as a tuple of their structures, kwargs).
+    self.assertFalse(f_exe._no_kwargs)
+    self.assertEqual(f_exe.in_tree, jax.tree_flatten(((0,), {}))[1])
+    self.assertEqual(f_exe.args_in_tree(), jax.tree_flatten((0,))[1])
+    self.assertEqual(f_exe.kwargs_in_tree(), jax.tree_flatten({})[1])
+
   def test_jit_lower_duck_typing(self):
     f_jit = self.jit(lambda x: 2 * x)
     f_low = f_jit.lower(jax.ShapeDtypeStruct((), 'float32'))  # doesn't crash

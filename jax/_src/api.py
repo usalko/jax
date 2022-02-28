@@ -547,6 +547,8 @@ class Compiled:
   __slots__ = ['in_tree', 'out_tree', 'donate_argnums', '_executable',
                '_no_kwargs']
 
+  # If `_no_kwargs is True`, this will be the PyTreeDef of the positional
+  # arguments only. It will be the PyTreeDef of (args, kwargs) otherwise.
   in_tree: PyTreeDef
   out_tree: PyTreeDef
   donate_argnums: Tuple[int]
@@ -562,6 +564,20 @@ class Compiled:
     self.out_tree = out_tree
     self.donate_argnums = donate_argnums
     self._no_kwargs = no_kwargs
+
+  def args_in_tree(self) -> PyTreeDef:
+    """Returns the positional arguments `PyTreeDef`."""
+    if self._no_kwargs:
+      return self.in_tree
+    else:
+      return self.in_tree.children()[0]
+
+  def kwargs_in_tree(self) -> PyTreeDef:
+    """Returns the keyword arguments `PyTreeDef`."""
+    if self._no_kwargs:
+      return tree_flatten({})[1]
+    else:
+      return self.in_tree.children()[1]
 
   def compiler_ir(self):
     """Post-compilation IR.
