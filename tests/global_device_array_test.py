@@ -79,6 +79,7 @@ class GDATest(jtu.JaxTestCase):
                                           mesh_axes, cb)
     self.assertEqual(gda.ndim, 2)
     self.assertEqual(gda.size, 16)
+    self.assertEqual(gda.mesh_axes, P(*mesh_axes))
     self.assertEqual(gda.local_shards[0].index, expected_index[0])
     self.assertArraysEqual(gda.local_data(0),
                            global_input_data[expected_index[0]])

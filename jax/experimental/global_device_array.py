@@ -46,14 +46,17 @@ def _convert_list_args_to_tuple(f):
   return wrapper
 
 
+def _canonicalize_mesh_axes(mesh_axes: MeshAxes) -> PartitionSpec:
+  if not isinstance(mesh_axes, PartitionSpec):
+    return PartitionSpec(*mesh_axes)
+  return mesh_axes
+
+
 def _get_array_mapping(mesh_axes):
   # Import here to avoid cyclic import error when importing gda in pjit.py.
   from jax.experimental.pjit import get_array_mapping, _prepare_axis_resources
 
-  if not isinstance(mesh_axes, PartitionSpec):
-    pspec = PartitionSpec(*mesh_axes)
-  else:
-    pspec = mesh_axes
+  pspec = _canonicalize_mesh_axes(mesh_axes)
   parsed_pspec, _, _ = _prepare_axis_resources(pspec, "mesh_axes")
   return get_array_mapping(parsed_pspec)
 
@@ -325,6 +328,10 @@ class GlobalDeviceArray:
   @property
   def mesh(self):
     return self._global_mesh
+
+  @property
+  def mesh_axes(self) -> PartitionSpec:
+    return _canonicalize_mesh_axes(self._mesh_axes)
 
   @property
   def is_fully_replicated(self) -> bool:
