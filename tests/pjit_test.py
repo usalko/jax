@@ -1143,8 +1143,32 @@ class GDAPjitTest(jtu.JaxTestCase):
       def f(x):
         return x
 
-      with maps.Mesh(global_mesh.devices, global_mesh.axis_names):
+      with global_mesh:
         out_gda = f(input_gda)
+        self.assertEqual(out_gda.mesh_axes, ())
+
+        before_cache = pjit_lib._pjit_lower.cache_info()
+        f(out_gda)
+        after_cache = pjit_lib._pjit_lower.cache_info()
+
+        self.assertNotEqual(id(before_cache), id(after_cache))
+        self.assertEqual(before_cache.hits + 1, after_cache.hits)
+        self.assertEqual(before_cache.misses, after_cache.misses)
+
+  def test_no_recompilation_due_to_fully_replicated_and_gda_inputs(self):
+    global_mesh = jtu.create_global_mesh((1, 2), ('x', 'y'))
+    global_input_shape = (8, 2)
+    mesh_axes = P(None)
+    global_data = np.arange(
+        prod(global_input_shape)).reshape(global_input_shape)
+
+    with jax._src.config.parallel_functions_output_gda(True):
+      @partial(pjit, in_axis_resources=mesh_axes, out_axis_resources=mesh_axes)
+      def f(x):
+        return x
+
+      with global_mesh:
+        out_gda = f(global_data)
         self.assertEqual(out_gda.mesh_axes, ())
 
         before_cache = pjit_lib._pjit_lower.cache_info()

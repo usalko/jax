@@ -232,25 +232,37 @@ def pjit(fun: Callable,
     _maybe_check_pjit_gda_mesh(args_flat, mesh)
 
     local_in_avals = tuple(shaped_abstractify(a) for a in args_flat)
+
+    in_axis_resources_flat, canonicalized_in_axis_resources_flat = _process_in_axis_resources(
+        hashable_pytree(in_axis_resources), in_tree)
+
     # TODO(yashkatariya): This is a hack. This should go away when avals have
     # is_global attribute.
+    # in_positional_semantics is GLOBAL for GDA and fully replicated inputs.
     in_positional_semantics = tuple(
-        maps._PositionalSemantics.GLOBAL if isinstance(a, GDA) else maps._positional_semantics.val
-        for a in args_flat)
+        maps._PositionalSemantics.GLOBAL
+        if ((not _is_from_gda(p) and p.partitions == ()) or isinstance(a, GDA))
+        else maps._positional_semantics.val
+        for p, a in safe_zip(canonicalized_in_axis_resources_flat, args_flat)
+    )
     out_positional_semantics = maps._positional_semantics.val
-    jaxpr, in_axis_resources_flat, out_axis_resources_flat = _pjit_jaxpr(
-        flat_fun, mesh, local_in_avals, in_tree,
-        hashable_pytree(in_axis_resources),
+
+    tree_map(_check_resources_mismatch, in_axis_resources_flat, tuple(args_flat))
+
+    jaxpr, canonicalized_out_axis_resources_flat = _pjit_jaxpr(
+        flat_fun, mesh, local_in_avals,
+        in_axis_resources_flat,
         HashableFunction(out_tree, closure=()),
         hashable_pytree(out_axis_resources),
-        in_positional_semantics, out_positional_semantics,
-        tuple(isinstance(a, GDA) for a in args_flat))
-    in_axis_resources_flat = tree_map(_maybe_replace_from_gda_with_pspec,
-                                      in_axis_resources_flat, tuple(args_flat))
+        in_positional_semantics, out_positional_semantics)
+
+    canonicalized_in_axis_resources_flat = tree_map(_maybe_replace_from_gda_with_pspec,
+        canonicalized_in_axis_resources_flat, tuple(args_flat))
+
     params = dict(
         jaxpr=jaxpr,
-        in_axis_resources=in_axis_resources_flat,
-        out_axis_resources=out_axis_resources_flat,
+        in_axis_resources=canonicalized_in_axis_resources_flat,
+        out_axis_resources=canonicalized_out_axis_resources_flat,
         resource_env=resource_env,
         donated_invars=donated_invars,
         name=getattr(flat_fun, '__name__', '<unnamed function>'),
@@ -354,27 +366,16 @@ class PytreeLeaf:
 
 @lu.cache
 def _pjit_jaxpr(fun, mesh, local_in_avals,
-                in_tree, in_axis_resources_thunk,
+                in_axis_resources_flat,
                 out_tree, out_axis_resources_thunk,
-                in_positional_semantics, out_positional_semantics, is_gda):
-  # TODO(yashkatariya): Make this work with FROM_GDA special value.
-  in_axis_resources_flat = flatten_axis_resources(
-        "pjit in_axis_resources", in_tree,
-        in_axis_resources_thunk(), tupled_args=True)
-  canonicalized_in_axis_resources_flat = tree_map(_create_cpspec, in_axis_resources_flat)
-  # This check should be above local_to_global call below otherwise if
-  # `FROM_GDA` is passed to any input other than GDA, a ugly error message
-  # will be raised because get_array_mapping (in local_to_global) of a
-  # FROM_GDA cannot happen.
-  tree_map(_check_resources_mismatch, in_axis_resources_flat, is_gda)
+                in_positional_semantics, out_positional_semantics):
   # If all inputs are either GDAs or fully replicated, then the avals are
   # global and the mesh should also be global. This split is because
   # non-contiguous mesh can only be used if all inputs are either GDAs or fully
   # replicated.
   # Use canonicalized in_axis_resources here because we want to treat P(None)
   # and None (for example) as equivalent.
-  if all(((not _is_from_gda(p) and p.partitions == ()) or ig)
-         for p, ig in safe_zip(canonicalized_in_axis_resources_flat, is_gda)):
+  if all(ips == maps._PositionalSemantics.GLOBAL for ips in in_positional_semantics):
     # Shapes should be checked against non canonicalized in_axis_resources.
     # For example, partitions of () and ((),) are not equivalent, since the
     # first one is a valid spec for a scalar value, while the second is not!
@@ -387,7 +388,7 @@ def _pjit_jaxpr(fun, mesh, local_in_avals,
                                     allow_uneven_sharding=False)
 
   global_in_avals = local_to_global(in_positional_semantics, mesh,
-                                    local_in_avals, canonicalized_in_axis_resources_flat)
+                                    local_in_avals, in_axis_resources_flat)
 
   prev_positional_val = maps._positional_semantics.val
   try:
@@ -407,8 +408,7 @@ def _pjit_jaxpr(fun, mesh, local_in_avals,
                                   allow_uneven_sharding=False)
   canonicalized_out_axis_resources_flat = tree_map(_create_cpspec, out_axis_resources_flat)
   # lu.cache needs to be able to create weakrefs to outputs, so we can't return a plain tuple
-  return _ListWithW([jaxpr, canonicalized_in_axis_resources_flat,
-                     canonicalized_out_axis_resources_flat])
+  return _ListWithW([jaxpr, canonicalized_out_axis_resources_flat])
 
 
 class SpecSync(IntEnum):
@@ -492,9 +492,6 @@ class ParsedPartitionSpec:
             f"unsafe_user_spec={self.unsafe_user_spec}, "
             f"sync={self.sync})")
 
-REPLICATED = ParsedPartitionSpec(None, ())
-
-
 class CanonicalizedParsedPartitionSpec(ParsedPartitionSpec):
   """ParsedPartitionSpecs that are canonicalized.
 
@@ -510,7 +507,9 @@ class CanonicalizedParsedPartitionSpec(ParsedPartitionSpec):
   partitions.
   """
 
-  def __init__(self, parsed_pspec: ParsedPartitionSpec):
+  def __init__(self, parsed_pspec: ParsedPartitionSpec, gda_spec: bool = False):
+    self.gda_spec = gda_spec
+
     partitions = list(parsed_pspec.partitions)
     while partitions and partitions[-1] == ():
       partitions.pop()
@@ -522,6 +521,9 @@ class CanonicalizedParsedPartitionSpec(ParsedPartitionSpec):
     return (f"CanonicalizedParsedPartitionSpec(partitions={self.partitions}, "
             f"unsafe_user_spec={self.unsafe_user_spec}, "
             f"sync={self.sync})")
+
+
+REPLICATED = CanonicalizedParsedPartitionSpec(ParsedPartitionSpec(None, ()))
 
 
 def _prepare_axis_resources(axis_resources,
@@ -538,8 +540,8 @@ def _prepare_axis_resources(axis_resources,
   _check_unique_resources(entries, arg_name)
   return tree_unflatten(treedef, entries), entries, treedef
 
-def _check_resources_mismatch(in_axis_resources_flat, is_gda):
-  if not is_gda and _is_from_gda(in_axis_resources_flat):
+def _check_resources_mismatch(in_axis_resources_flat, arg):
+  if not isinstance(arg, GDA) and _is_from_gda(in_axis_resources_flat):
     raise ValueError('For a non-GDA input, the corresponding resource in '
                      'in_axis_resources cannot be `pjit.FROM_GDA`.')
 
@@ -623,8 +625,11 @@ def _pjit_lower(
   f = core.jaxpr_as_fun(jaxpr)
   f.__name__ = name
   fun = lu.wrap_init(f)
-  in_is_gda = [ips == maps._PositionalSemantics.GLOBAL
-               for ips in in_positional_semantics]
+  # GLOBAL positional semantics here means that input can be a GDA or a fully
+  # replicated value. So we need to check in_axis_resources too to find out
+  # which input is actually a GDA.
+  in_is_gda = [ips == maps._PositionalSemantics.GLOBAL and iar.gda_spec
+               for ips, iar in safe_zip(in_positional_semantics, in_axis_resources)]
   return pxla.lower_mesh_computation(
       fun, 'pjit', name, resource_env.physical_mesh,
       in_axes, out_axes, donated_invars,
@@ -1041,17 +1046,26 @@ def global_to_local(positional_semantics, mesh, avals, axes):
   if isinstance(positional_semantics, maps._PositionalSemantics):
     positional_semantics = [positional_semantics] * len(axes)
   return [
-      aval if ps == maps._PositionalSemantics.GLOBAL or aval_axes.partitions == () else mesh._global_to_local(
+      aval if ps == maps._PositionalSemantics.GLOBAL else mesh._global_to_local(
           get_array_mapping(aval_axes), aval)
       for aval, aval_axes, ps in safe_zip(avals, axes, positional_semantics)
   ]
 
 def local_to_global(positional_semantics, mesh, avals, axes):
   return [
-      aval if ps == maps._PositionalSemantics.GLOBAL or aval_axes.partitions == () else mesh._local_to_global(
+      aval if ps == maps._PositionalSemantics.GLOBAL else mesh._local_to_global(
           get_array_mapping(aval_axes), aval)
       for aval, aval_axes, ps in safe_zip(avals, axes, positional_semantics)
   ]
+
+
+@cache()
+def _process_in_axis_resources(in_axis_resources_thunk, in_tree):
+  in_axis_resources_flat = flatten_axis_resources(
+      "pjit in_axis_resources", in_tree, in_axis_resources_thunk(), tupled_args=True)
+  canonicalized_in_axis_resources_flat = tree_map(_create_cpspec, in_axis_resources_flat)
+  return in_axis_resources_flat, canonicalized_in_axis_resources_flat
+
 
 def _create_cpspec(x):
   return x if _is_from_gda(x) else CanonicalizedParsedPartitionSpec(x)
@@ -1061,7 +1075,7 @@ def _maybe_replace_from_gda_with_pspec(
   if isinstance(arg, GDA):
     gda_cpspec = CanonicalizedParsedPartitionSpec(
         ParsedPartitionSpec.from_user_input(
-            arg.mesh_axes, arg_name="GDA mesh_axes"))
+            arg.mesh_axes, arg_name="GDA mesh_axes"), gda_spec=True)
     assert type(gda_cpspec) is CanonicalizedParsedPartitionSpec
     if (not _is_from_gda(in_axis_resources_flat) and
         in_axis_resources_flat != gda_cpspec):
