@@ -981,7 +981,10 @@ class Jax2TfLimitation(primitive_harness.Limitation):
         U = u[..., :s.shape[-1]]
         V = v[..., :s.shape[-1], :]
         S = s[..., None, :]
-        return jnp.matmul(U * S, V), s.shape, u.shape, v.shape
+        # Both Numpy and JAX return the adjoint of `V`, i.e. V^H, whereas TF
+        # returns `V`, where `V` contains the right singular vectors.
+        V = jnp.swapaxes(V, -2, -1).conj() if is_tf else V
+        return jnp.matmul(U * S, V)
 
       if compute_uv:
         r_jax_reconstructed = _reconstruct_operand(r_jax, False)
