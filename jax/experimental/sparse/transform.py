@@ -435,17 +435,16 @@ def _dot_general_sparse(spenv, *spvalues, dimension_numbers, precision, preferre
   A, B = spvalues_to_arrays(spenv, spvalues)
   if spvalues[0].is_sparse() and spvalues[1].is_sparse():
     shape = sparse.bcoo._dot_general_validated_shape(A.shape, B.shape, dimension_numbers)
-    data, indices = sparse.bcoo_spdot_general(A.data, A.indices, B.data, B.indices,
-                                              lhs_spinfo=BCOOInfo(A.shape),
-                                              rhs_spinfo=BCOOInfo(B.shape),
-                                              dimension_numbers=dimension_numbers)
+    A_promoted = sparse.BCOO((A.data, A.indices), shape=A.shape)
+    B_promoted = sparse.BCOO((B.data, B.indices), shape=B.shape)
+    data, indices = sparse.bcoo_spdot_general(A, B, dimension_numbers=dimension_numbers)
     return [spenv.sparse(shape, data, indices)]
   elif spvalues[0].is_sparse():
-    result = sparse.bcoo_dot_general(A.data, A.indices, B, lhs_spinfo=BCOOInfo(A.shape),
-                                     dimension_numbers=dimension_numbers)
+    A_promoted = sparse.BCOO((A.data, A.indices), shape=A.shape)
+    result = sparse.bcoo_dot_general(A_promoted, B, dimension_numbers=dimension_numbers)
   else:
-    result = sparse.bcoo_rdot_general(A, B.data, B.indices, rhs_spinfo=BCOOInfo(B.shape),
-                                      dimension_numbers=dimension_numbers)
+    B_promoted = sparse.BCOO((B.data, B.indices), shape=B.shape)
+    result = sparse.bcoo_rdot_general(A, B_promoted, dimension_numbers=dimension_numbers)
   return [spenv.dense(result)]
 
 sparse_rules[lax.dot_general_p] = _dot_general_sparse
@@ -454,9 +453,8 @@ def _transpose_sparse(spenv, *spvalues, permutation):
   permutation = tuple(permutation)
   args = spvalues_to_arrays(spenv, spvalues)
   shape = args[0].shape
-  data, indices = sparse.bcoo_transpose(args[0].data, args[0].indices,
-                                        permutation=permutation,
-                                        spinfo=BCOOInfo(shape))
+  mat = sparse.BCOO((args[0].data, args[0].indices), shape=shape)
+  data, indices = sparse.bcoo_transpose(mat, permutation=permutation)
   out_shape = tuple(shape[i] for i in permutation)
 
   n_batch = args[0].indices.ndim - 2
@@ -518,16 +516,15 @@ def _mul_sparse(spenv, *spvalues):
       out_data = lax.mul(spenv.data(X), spenv.data(Y))
       out_spvalue = spenv.sparse(X.shape, out_data, indices_ref=X.indices_ref)
     else:
-      data, indices, shape = bcoo_multiply_sparse(spenv.data(X), spenv.indices(X),
-                                                  spenv.data(Y), spenv.indices(Y),
-                                                  lhs_spinfo=BCOOInfo(X.shape),
-                                                  rhs_spinfo=BCOOInfo(Y.shape))
+      X_promoted = BCOO((spenv.data(X), spenv.indices(X)), shape=X.shape)
+      Y_promoted = BCOO((spenv.data(Y), spenv.indices(Y)), shape=Y.shape)
+      data, indices, shape = bcoo_multiply_sparse(X_promoted, Y_promoted)
       out_spvalue = spenv.sparse(shape, data, indices)
   else:
     if Y.is_sparse():
       X, Y = Y, X
-    out_data = bcoo_multiply_dense(
-        spenv.data(X), spenv.indices(X), spenv.data(Y), spinfo=BCOOInfo(X.shape))
+    X_promoted = sparse.BCOO((spenv.data(X), spenv.indices(X)), shape=X.shape)
+    out_data = bcoo_multiply_dense(X_promoted, spenv.data(Y))
     out_spvalue = spenv.sparse(X.shape, out_data, indices_ref=X.indices_ref)
 
   return (out_spvalue,)
@@ -536,8 +533,8 @@ sparse_rules[lax.mul_p] = _mul_sparse
 
 def _reduce_sum_sparse(spenv, *spvalues, axes):
   X, = spvalues
-  data, indices, out_shape = sparse.bcoo_reduce_sum(
-      spenv.data(X), spenv.indices(X), spinfo=BCOOInfo(X.shape), axes=axes)
+  X_promoted = BCOO((spenv.data(X), spenv.indices(X)), shape=X.shape)
+  data, indices, out_shape = sparse.bcoo_reduce_sum(X_promoted, axes=axes)
   if out_shape == ():
     out_spvalue = spenv.dense(data.sum())
   else:
@@ -548,8 +545,9 @@ sparse_rules[lax.reduce_sum_p] = _reduce_sum_sparse
 
 def _broadcast_in_dim_sparse(spenv, *spvalues, shape, broadcast_dimensions):
   operand, = spvalues
-  data, indices = sparse.bcoo_broadcast_in_dim(spenv.data(operand), spenv.indices(operand),
-                                               spinfo=BCOOInfo(operand.shape), shape=shape,
+  operand_promoted = sparse.BCOO((spenv.data(operand), spenv.indices(operand)),
+                                 shape=operand.shape)
+  data, indices = sparse.bcoo_broadcast_in_dim(operand_promoted, shape=shape,
                                                broadcast_dimensions=broadcast_dimensions)
   return (spenv.sparse(shape, data, indices),)
 
