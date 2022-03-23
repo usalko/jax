@@ -235,8 +235,13 @@ def pjit(fun: Callable,
     local_in_avals = tuple(shaped_abstractify(a) for a in args_flat)
     # TODO(yashkatariya): This is a hack. This should go away when avals have
     # is_global attribute.
+    # `ShapedArray` is not an allowed value if calling pjit directly
+    # (i.e. pjit(f, ...)(*args)). But `ShapedArray` is allowed as an input to
+    # `f_pjitted.lower(*args)`. If a `ShapedArray` is an input during
+    # `pjit.lower()`, consider it as global.
     in_positional_semantics = tuple(
-        maps._PositionalSemantics.GLOBAL if isinstance(a, GDA) else maps._positional_semantics.val
+        maps._PositionalSemantics.GLOBAL if isinstance(a, GDA) or
+        isinstance(a, core.ShapedArray) else maps._positional_semantics.val
         for a in args_flat)
     out_positional_semantics = maps._positional_semantics.val
 
@@ -370,14 +375,15 @@ def _process_in_axis_resources(mesh, local_in_avals, in_axis_resources_thunk,
   # will be raised because get_array_mapping (in local_to_global) of a
   # FROM_GDA cannot happen.
   tree_map(_check_resources_mismatch, in_axis_resources_flat, is_gda)
-  # If all inputs are either GDAs or fully replicated, then the avals are
+  # If all inputs have global semantics or fully replicated, then the avals are
   # global and the mesh should also be global. This split is because
   # non-contiguous mesh can only be used if all inputs are either GDAs or fully
   # replicated.
   # Use canonicalized in_axis_resources here because we want to treat P(None)
   # and None (for example) as equivalent.
-  if all(((not _is_from_gda(p) and p.partitions == ()) or ig)
-         for p, ig in safe_zip(canonicalized_in_axis_resources_flat, is_gda)):
+  if all(
+      (not _is_from_gda(p) and p.partitions == ()) or ips == maps._PositionalSemantics.GLOBAL
+      for p, ips in safe_zip(canonicalized_in_axis_resources_flat, in_positional_semantics)):
     # Shapes should be checked against non canonicalized in_axis_resources.
     # For example, partitions of () and ((),) are not equivalent, since the
     # first one is a valid spec for a scalar value, while the second is not!
