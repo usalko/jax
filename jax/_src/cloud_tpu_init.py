@@ -101,14 +101,13 @@ def cloud_tpu_init():
   }
 
   os.environ['CLOUD_TPU_TASK_ID'] = worker_id
-  os.environ['TPU_CHIPS_PER_HOST_BOUNDS'] = '2,2,1'
-  os.environ['TPU_HOST_BOUNDS'] = accelerator_type_to_host_bounds[
-      accelerator_type]
   os.environ['TPU_MESH_CONTROLLER_ADDRESS'] = worker_network_endpoints.split(
       ',')[0].split(':')[2] + ':8476'
   os.environ['TPU_MESH_CONTROLLER_PORT'] = '8476'
 
-  if (not os.environ.get('TPU_TOPOLOGY_WRAP', None)
-      and 'v4' in accelerator_type
-      and accelerator_type not in ['v4-8', 'v4-16', 'v4-32', 'v4-64']):
-    os.environ['TPU_TOPOLOGY_WRAP'] = 'true,true,true'
+      # If v4 TPU don't set any topology related flags so they are set using
+  # instance metadata.
+  if not accelerator_type.startswith('v4-'):
+    os.environ['TPU_CHIPS_PER_HOST_BOUNDS'] = '2,2,1'
+    os.environ['TPU_HOST_BOUNDS'] = accelerator_type_to_host_bounds[
+        accelerator_type]
