@@ -340,7 +340,7 @@ class cuSparseTest(jtu.JaxTestCase):
     M = rng(shape, dtype)
 
     args = (M.data, M.row, M.col)
-    todense = lambda *args: sparse_coo._coo_todense(*args, spinfo=sparse_coo.COOInfo(shape=M.shape, rows_sorted=True))
+    todense = lambda *args: sparse_coo._coo_todense(*args, spinfo=sparse_coo.COOInfo(shape=M.shape, indices_sorted=False))
 
     self.assertArraysEqual(M.toarray(), todense(*args))
     with self.gpu_dense_conversion_warning_context(dtype):
@@ -386,7 +386,7 @@ class cuSparseTest(jtu.JaxTestCase):
     v = v_rng(op(M).shape[1], dtype)
 
     args = (M.data, M.row, M.col, v)
-    matvec = lambda *args: sparse_coo._coo_matvec(*args, spinfo=sparse_coo.COOInfo(shape=M.shape, rows_sorted=True), transpose=transpose)
+    matvec = lambda *args: sparse_coo._coo_matvec(*args, spinfo=sparse_coo.COOInfo(shape=M.shape, indices_sorted=False), transpose=transpose)
 
     self.assertAllClose(op(M) @ v, matvec(*args), rtol=MATMUL_TOL)
     with self.gpu_matmul_warning_context(dtype):
@@ -408,7 +408,7 @@ class cuSparseTest(jtu.JaxTestCase):
     B = B_rng((op(M).shape[1], 4), dtype)
 
     args = (M.data, M.row, M.col, B)
-    matmat = lambda *args: sparse_coo._coo_matmat(*args, spinfo=sparse_coo.COOInfo(shape=shape, rows_sorted=True), transpose=transpose)
+    matmat = lambda *args: sparse_coo._coo_matmat(*args, spinfo=sparse_coo.COOInfo(shape=shape, indices_sorted=False), transpose=transpose)
 
     self.assertAllClose(op(M) @ B, matmat(*args), rtol=MATMUL_TOL)
     with self.gpu_matmul_warning_context(dtype):
@@ -424,7 +424,7 @@ class cuSparseTest(jtu.JaxTestCase):
     x = jnp.arange(9).reshape(3, 3).astype(d.dtype)
 
     def f(x):
-      return sparse_coo._coo_matmat(d, i, j, x.T, spinfo=sparse_coo.COOInfo(shape=shape, rows_sorted=True))
+      return sparse_coo._coo_matmat(d, i, j, x.T, spinfo=sparse_coo.COOInfo(shape=shape, indices_sorted=True))
 
     result = f(x)
     result_jit = jit(f)(x)
@@ -438,7 +438,7 @@ class cuSparseTest(jtu.JaxTestCase):
     mat = sparse.COO.fromdense(sprng((5, 6), np.float32))
     perm = rng.permutation(mat.nse)
     mat_unsorted = sparse.COO((mat.data[perm], mat.row[perm], mat.col[perm]), shape=mat.shape)
-    mat_resorted = mat_unsorted._sort_rows()
+    mat_resorted = mat_unsorted._sort_indices()
     self.assertArraysEqual(mat.todense(), mat_resorted.todense())
 
   @unittest.skipIf(not GPU_LOWERING_ENABLED, "test requires cusparse/hipsparse")
@@ -448,61 +448,52 @@ class cuSparseTest(jtu.JaxTestCase):
 
     mat = jnp.arange(12, dtype=dtype).reshape(4, 3)
 
-    mat_rows_sorted = sparse.COO.fromdense(mat)
-    self.assertTrue(mat_rows_sorted._rows_sorted)
-    self.assertFalse(mat_rows_sorted._cols_sorted)
+    mat_indices_sorted = sparse.COO.fromdense(mat)
+    self.assertTrue(mat_indices_sorted._indices_sorted)
 
-    mat_cols_sorted = sparse.COO.fromdense(mat.T).T
-    self.assertFalse(mat_cols_sorted._rows_sorted)
-    self.assertTrue(mat_cols_sorted._cols_sorted)
+    mat_unsorted = sparse.COO(mat_indices_sorted._bufs,
+                              shape=mat_indices_sorted.shape)
+    self.assertFalse(mat_unsorted._indices_sorted)
 
-    mat_unsorted = sparse.COO(mat_rows_sorted._bufs, shape=mat_rows_sorted.shape)
-    self.assertFalse(mat_unsorted._rows_sorted)
-    self.assertFalse(mat_unsorted._cols_sorted)
-
-    self.assertArraysEqual(mat, mat_rows_sorted._sort_rows().todense())
-    self.assertArraysEqual(mat, mat_cols_sorted._sort_rows().todense())
-    self.assertArraysEqual(mat, mat_unsorted._sort_rows().todense())
+    self.assertArraysEqual(mat, mat_indices_sorted._sort_indices().todense())
+    self.assertArraysEqual(mat, mat_unsorted._sort_indices().todense())
 
     todense = jit(sparse.coo_todense)
     with self.assertNoWarnings():
-      dense_rows_sorted = todense(mat_rows_sorted)
-      dense_cols_sorted = todense(mat_cols_sorted)
-      dense_unsorted = todense(mat_unsorted._sort_rows())
-    with self.assertWarnsRegex(sparse.CuSparseEfficiencyWarning, "coo_todense GPU lowering requires matrices with sorted rows.*"):
-      dense_unsorted_fallback = todense(mat_unsorted)
-    self.assertArraysEqual(mat, dense_rows_sorted)
-    self.assertArraysEqual(mat, dense_cols_sorted)
+      dense_indices_sorted = todense(mat_indices_sorted)
+      dense_unsorted = todense(mat_unsorted._sort_indices())
+    with self.assertWarnsRegex(sparse.CuSparseEfficiencyWarning,
+                               "coo_todense GPU lowering requires matrices with sorted indices. Sorting triggered with a cost."):
+      dense_unsorted_sorting_triggered = todense(mat_unsorted)
+    self.assertArraysEqual(mat, dense_indices_sorted)
     self.assertArraysEqual(mat, dense_unsorted)
-    self.assertArraysEqual(mat, dense_unsorted_fallback)
+    self.assertArraysEqual(mat, dense_unsorted_sorting_triggered)
 
     rhs_vec = jnp.arange(3, dtype=dtype)
     matvec = jit(sparse.coo_matvec)
     matvec_expected = mat @ rhs_vec
     with self.assertNoWarnings():
-      matvec_rows_sorted = matvec(mat_rows_sorted, rhs_vec)
-      matvec_cols_sorted = matvec(mat_cols_sorted, rhs_vec)
-      matvec_unsorted = matvec(mat_unsorted._sort_rows(), rhs_vec)
-    with self.assertWarnsRegex(sparse.CuSparseEfficiencyWarning, "coo_matvec GPU lowering requires matrices with sorted rows.*"):
-      matvec_unsorted_fallback = matvec(mat_unsorted, rhs_vec)
-    self.assertArraysEqual(matvec_expected, matvec_rows_sorted)
-    self.assertArraysEqual(matvec_expected, matvec_cols_sorted)
+      matvec_indices_sorted = matvec(mat_indices_sorted, rhs_vec)
+      matvec_unsorted = matvec(mat_unsorted._sort_indices(), rhs_vec)
+    with self.assertWarnsRegex(sparse.CuSparseEfficiencyWarning,
+                               "coo_matvec GPU lowering requires matrices with sorted indices. Sorting triggered with a cost."):
+      matvec_unsorted_sorting_triggered = matvec(mat_unsorted, rhs_vec)
+    self.assertArraysEqual(matvec_expected, matvec_indices_sorted)
     self.assertArraysEqual(matvec_expected, matvec_unsorted)
-    self.assertArraysEqual(matvec_expected, matvec_unsorted_fallback)
+    self.assertArraysEqual(matvec_expected, matvec_unsorted_sorting_triggered)
 
     rhs_mat = jnp.arange(6, dtype=dtype).reshape(3, 2)
     matmat = jit(sparse.coo_matmat)
     matmat_expected = mat @ rhs_mat
     with self.assertNoWarnings():
-      matmat_rows_sorted = matmat(mat_rows_sorted, rhs_mat)
-      matmat_cols_sorted = matmat(mat_cols_sorted, rhs_mat)
-      matmat_unsorted = matmat(mat_unsorted._sort_rows(), rhs_mat)
-    with self.assertWarnsRegex(sparse.CuSparseEfficiencyWarning, "coo_matmat GPU lowering requires matrices with sorted rows.*"):
-      matmat_unsorted_fallback = matmat(mat_unsorted, rhs_mat)
-    self.assertArraysEqual(matmat_expected, matmat_rows_sorted)
-    self.assertArraysEqual(matmat_expected, matmat_cols_sorted)
+      matmat_indices_sorted = matmat(mat_indices_sorted, rhs_mat)
+      matmat_unsorted = matmat(mat_unsorted._sort_indices(), rhs_mat)
+    with self.assertWarnsRegex(sparse.CuSparseEfficiencyWarning,
+                               "coo_matmat GPU lowering requires matrices with sorted indices. Sorting triggered with a cost."):
+      matmat_unsorted_sorting_triggered = matmat(mat_unsorted, rhs_mat)
+    self.assertArraysEqual(matmat_expected, matmat_indices_sorted)
     self.assertArraysEqual(matmat_expected, matmat_unsorted)
-    self.assertArraysEqual(matmat_expected, matmat_unsorted_fallback)
+    self.assertArraysEqual(matmat_expected, matmat_unsorted_sorting_triggered)
 
   @unittest.skipIf(jtu.device_under_test() != "gpu", "test requires GPU")
   def test_gpu_translation_rule(self):
@@ -552,7 +543,7 @@ class cuSparseTest(jtu.JaxTestCase):
     rng = rand_sparse(self.rng(), post=jnp.array)
     M = rng(shape, dtype)
     data, row, col = sparse_coo._coo_fromdense(M, nse=(M != 0).sum())
-    f = lambda data: sparse_coo._coo_todense(data, row, col, spinfo=sparse_coo.COOInfo(shape=M.shape, rows_sorted=True))
+    f = lambda data: sparse_coo._coo_todense(data, row, col, spinfo=sparse_coo.COOInfo(shape=M.shape, indices_sorted=True))
 
     # Forward-mode
     primals, tangents = jax.jvp(f, [data], [jnp.ones_like(data)])
