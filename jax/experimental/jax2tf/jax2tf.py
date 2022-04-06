@@ -31,7 +31,6 @@ from jax.experimental import pjit
 from jax.interpreters import ad
 from jax.interpreters import partial_eval
 from jax.interpreters import pxla
-from jax.interpreters import sharded_jit
 from jax.interpreters import xla
 
 import jax._src.prng
@@ -877,8 +876,6 @@ class TensorFlowTrace(core.Trace):
           with tf.name_scope(_sanitize_scope_name(params["name"])):
             vals_out: Sequence[Tuple[TfVal, core.ShapedArray]] = \
                 interpreted_fun.call_wrapped(*vals)
-        elif call_primitive == sharded_jit.sharded_call_p:
-          vals_out = _sharded_call(interpreted_fun, vals, **params)
         elif call_primitive == xla.xla_call_p:
           if _WRAP_JAX_JIT_WITH_TF_FUNCTION:
             # Make a nested tf.function(jit_compile=True)
@@ -969,8 +966,7 @@ def _unexpected_primitive(p: core.Primitive, *args, **kwargs):
 
 # Call primitives are inlined
 for unexpected in [core.call_p, core.named_call_p, xla.xla_call_p,
-                   partial_eval.remat_call_p, sharded_jit.sharded_call_p,
-                   maps.xmap_p]:
+                   partial_eval.remat_call_p, maps.xmap_p]:
   tf_impl[unexpected] = partial(_unexpected_primitive, unexpected)
 
 # Primitives that are not yet implemented must be explicitly declared here.
@@ -2649,17 +2645,6 @@ def _sharded_call(f: lu.WrappedFun, vals: Sequence[TfVal],
       for (val, val_aval), val_part in zip(vals_out, out_parts_flat)
   ]
   return sharded_vals_out
-
-
-def _sharded_jit_sharding_constraint(arg: TfVal, *,
-                                     partitions: pxla.PartitionsOrReplicated,
-                                     _in_avals: Sequence[core.ShapedArray],
-                                     _out_aval: core.ShapedArray):
-  del _in_avals, _out_aval
-  return split_to_logical_devices(arg, partitions)
-
-
-tf_impl_with_avals[sharded_jit.sharding_constraint_p] = _sharded_jit_sharding_constraint
 
 
 def _pjit(*args: TfVal,
