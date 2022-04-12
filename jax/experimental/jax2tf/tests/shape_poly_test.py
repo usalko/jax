@@ -19,6 +19,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 import collections
 import functools
 from functools import partial
+import logging
 import operator
 import re
 
@@ -386,6 +387,89 @@ class ShapePolyTest(tf_test_util.JaxToTfTestCase):
         input_signature=[tf.TensorSpec([None, None]), tf.TensorSpec([None, None])],
         polymorphic_shapes=PS("h", "h"),
         expected_output_signature=tf.TensorSpec([None, None]))
+
+  def test_static_shape_result(self):
+    """The result has static shape."""
+
+    def f_jax(x):
+      return jnp.sum(x + jnp.sin(x), axis=0)
+
+    self.CheckShapePolymorphism(
+        f_jax,
+        input_signature=[tf.TensorSpec([2, 3])],
+        polymorphic_shapes=None,
+        expected_output_signature=tf.TensorSpec([3]))
+
+    self.CheckShapePolymorphism(
+        f_jax,
+        input_signature=[tf.TensorSpec([None, 3])],
+        polymorphic_shapes="b, _",
+        expected_output_signature=tf.TensorSpec([3]))
+
+  def helper_run_with_and_without_shapepoly(self, f_jax):
+    """Given f_jax a function with one argument of type f32[?], runs f_jax(x)
+
+       directly and then with shape-polymorphic conversion
+    """
+    x = np.ones((3,), dtype=np.float32)
+    logging.info("running with JAX native on f32[3]")
+    res_jax = f_jax(x)
+
+    logging.info("running with TF without shape polymorphism on f32[3]")
+    res_tf_no_poly = jax2tf.convert(f_jax)(x)
+
+    logging.info("running with TF with shape polymorphism on f32[3]")
+    f_tf_poly = jax2tf.convert(f_jax, polymorphic_shapes="b")
+    res_tf_poly = f_tf_poly(x)
+
+    logging.info("running with TF with shape polymorphism on f32[5]")
+    x = np.ones((5,), dtype=np.float32)
+    res_tf_poly = f_tf_poly(x)
+
+  def test_debug_xlacallmodule_simple(self):
+    # TODO: remove this test
+    """Just for debugging. Instead of CheckShapePolymorphism, run the code"""
+
+    def f_jax(x):  # x: f32[?]
+      return x + x
+
+    self.helper_run_with_and_without_shapepoly(f_jax)
+
+  def test_debug_xlacallmodule_concatenate(self):
+    # TODO: remove this test
+    def f_jax(x):  # x: f32[?]
+      return lax.concatenate([x, x], 0)
+
+    self.helper_run_with_and_without_shapepoly(f_jax)
+
+  def test_debug_xlacallmodule_dynamic_broadcast_in_dim(self):
+    # TODO: remove this test
+    def f_jax(x):  # x: f32[?]
+      return x + 1.
+
+    self.helper_run_with_and_without_shapepoly(f_jax)
+
+  def test_debug_xlacallmodule_dynamic_iota(self):
+    # TODO: remove this test
+    def f_jax(x):  # x: f32[?]
+      return x + lax.iota(np.float32, x.shape[0])
+
+    self.helper_run_with_and_without_shapepoly(f_jax)
+
+  def test_debug_xlacallmodule_reshape(self):
+    # TODO: remove this test
+    def f_jax(x):  # x: f32[?]
+      return lax.reshape(x, (1, x.shape[0], 1))
+
+    self.helper_run_with_and_without_shapepoly(f_jax)
+
+  def test_debug_xlacallmodule_cond(self):
+    # TODO: remove this test
+    def f_jax(x):  # x: f32[?]
+      return lax.cond(jnp.sum(x) > 0, lambda x: x + x, lambda x: x * x, x)
+
+    self.helper_run_with_and_without_shapepoly(f_jax)
+
 
   def test_forgot_polymorphic_shapes_error(self):
     msg_re = "polymorphic shape None in axis .* must contain a dimension variable for unknown dimension in argument shape .*. Perhaps you forgot to add the polymorphic_shapes"

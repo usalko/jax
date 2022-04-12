@@ -47,9 +47,13 @@ config.parse_flags_with_absl()
 
 class Jax2TfTest(tf_test_util.JaxToTfTestCase):
 
+  def test_empty(self):
+    f_jax = lambda x, y: x
+    self.ConvertAndCompare(f_jax, 0.7, 1)
+
   def test_basics(self):
     f_jax = lambda x: jnp.sin(jnp.cos(x))
-    _, res_tf = self.ConvertAndCompare(f_jax, 0.7)
+    self.ConvertAndCompare(f_jax, 0.7)
 
   def test_input_output_naming(self):
     @jax2tf.convert
