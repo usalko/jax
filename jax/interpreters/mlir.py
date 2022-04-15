@@ -852,8 +852,7 @@ register_lowering(core.call_p, partial(_named_call_lowering, name="core_call"))
 def full_like_aval(value, aval: core.ShapedArray) -> ir.Value:
   """Returns an IR constant shaped full of `value` shaped like `aval`."""
   zero = ir_constant(np.array(value, aval.dtype))
-  return mhlo.BroadcastOp(aval_to_ir_type(aval), zero,
-                          dense_int_elements(aval.shape)).result
+  return mhlo.BroadcastOp(zero, dense_int_elements(aval.shape)).result
 
 def zeros_like_lowering(ctx, x):
   aval, = ctx.avals_in

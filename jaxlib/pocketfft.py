@@ -163,7 +163,6 @@ def pocketfft_mhlo(a, dtype, *, fft_type: FftType, fft_lengths: List[int]):
                         ir.DenseElementsAttr.get(np.array(0, dtype=out_dtype),
                                                  type=out_type))
     return mhlo.BroadcastOp(
-        ir.RankedTensorType.get(out_shape, out_type),
         zero,
         ir.DenseElementsAttr.get(np.asarray(out_shape, np.int64))).result
 

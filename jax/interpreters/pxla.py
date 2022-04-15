@@ -1647,9 +1647,7 @@ def _mhlo_unshard(aval, axis_env, out_axis, xs, platform):
     padded = mhlo.DynamicUpdateSliceOp(
         padded.type,
         padded,
-        mhlo.BroadcastOp(mlir.aval_to_ir_type(aval.update(shape=[1] + dims)), x,
-                         mlir.dense_int_elements([1])).result,
-        idxs).result
+        mhlo.BroadcastOp(x, mlir.dense_int_elements([1])).result, idxs).result
     replica_groups = mlir.dense_int_elements(
       xla.axis_groups(axis_env, axis_env.names[-1]))
     out = mhlo.CrossReplicaSumOp(padded, replica_groups).result
