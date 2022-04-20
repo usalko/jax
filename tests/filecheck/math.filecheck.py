@@ -46,7 +46,7 @@ def main(_):
   print_ir(np.float32(1))(lax.acos)
 
   # CHECK-LABEL: TEST: acosh float32[]
-  # CHECK: xla_fallback_acosh
+  # CHECK: chlo.acosh
   # CHECK-SAME: tensor<f32>
   print_ir(np.float32(0))(lax.acosh)
 
@@ -56,7 +56,7 @@ def main(_):
   print_ir(np.float32(1))(lax.asin)
 
   # CHECK-LABEL: TEST: asinh float32[]
-  # CHECK: xla_fallback_asinh
+  # CHECK: chlo.asinh
   # CHECK-SAME: tensor<f32>
   print_ir(np.float32(0))(lax.asinh)
 
@@ -66,7 +66,7 @@ def main(_):
   print_ir(np.float32(1))(lax.atan)
 
   # CHECK-LABEL: TEST: atanh float32[]
-  # CHECK: xla_fallback_atanh
+  # CHECK: chlo.atanh
   # CHECK-SAME: tensor<f32>
   print_ir(np.float32(0))(lax.atanh)
 
@@ -458,10 +458,8 @@ def main(_):
   print_ir(jnp.bfloat16(0))(lax.sqrt)
 
   # CHECK-LABEL: TEST: tan float16[]
-  # CHECK: mhlo.sine
-  # CHECK-SAME: tensor<f32>
-  # CHECK: mhlo.cosine
-  # CHECK-SAME: tensor<f32>
+  # CHECK: chlo.tan
+  # CHECK-SAME: tensor<f16>
   print_ir(np.float16(0))(lax.tan)
 
   # CHECK-LABEL: TEST: tanh float32[]
