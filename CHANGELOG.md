@@ -24,6 +24,8 @@ PLEASE REMEMBER TO CHANGE THE '..main' WITH AN ACTUAL TAG in GITHUB LINK.
     invalid values (e.g., NaN) will be returned for out-of-bounds indices. In
     previous versions of JAX, invalid indices were clamped into range. The
     previous behavior can be restored by passing `mode="clip"`.
+  * {func}`jax.numpy.take` now defaults to `mode="fill"`, which returns
+    invalid values (e.g., NaN) for out-of-bounds indices.
   * {func}`jax.numpy.take_along_axis` now raises a `TypeError` if its indices
     are not of an integer type, matching the behavior of
     {func}`numpy.take_along_axis`. Previously non-integer indices were silently
