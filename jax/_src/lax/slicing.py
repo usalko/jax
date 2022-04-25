@@ -900,9 +900,13 @@ batching.primitive_batchers[dynamic_slice_p] = _dynamic_slice_batching_rule
 
 def _dynamic_slice_lower(ctx, x, *start_indices, slice_sizes):
   aval_out, = ctx.avals_out
-  return mhlo.DynamicSliceOp(mlir.aval_to_ir_type(aval_out), x,
-                             start_indices,
-                             mlir.dense_int_elements(slice_sizes)).results
+  if jax._src.lib.mlir_api_version < 13:
+    return mhlo.DynamicSliceOp(mlir.aval_to_ir_type(aval_out), x,
+                               start_indices,
+                               mlir.dense_int_elements(slice_sizes)).results
+  else:
+    return mhlo.DynamicSliceOp(x, start_indices,
+                               mlir.dense_int_elements(slice_sizes)).results
 
 mlir.register_lowering(dynamic_slice_p, _dynamic_slice_lower)
 
