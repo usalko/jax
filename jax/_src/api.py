@@ -545,7 +545,7 @@ def _jit_lower(fun, static_argnums, static_argnames, device, backend,
       return aval, None
 
   @api_boundary
-  def lower(*args, **kwargs) -> stages.Lowered:
+  def lower(*args, prune_unused: bool = True, **kwargs) -> stages.Lowered:
     """Lower this function for the given arguments.
 
     A lowered function is staged out of Python and translated to a
@@ -566,7 +566,7 @@ def _jit_lower(fun, static_argnums, static_argnames, device, backend,
     else:
       arg_specs = []
     computation = dispatch.lower_xla_callable(flat_fun, device, backend, name,
-                                              donated_invars, True,
+                                              donated_invars, True, prune_unused,
                                               *arg_specs_and_device)
     return stages.Lowered.from_flat_info(
         computation, in_tree, arg_specs, donate_argnums, out_tree())

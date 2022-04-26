@@ -195,7 +195,7 @@ xla.xla_call_p.def_impl(_xla_call_impl)
 def _xla_callable_uncached(fun: lu.WrappedFun, device, backend, name,
                            donated_invars, *arg_specs):
   return lower_xla_callable(fun, device, backend, name, donated_invars, False,
-                            *arg_specs).compile().unsafe_call
+                            True, *arg_specs).compile().unsafe_call
 
 _xla_callable = lu.cache(_xla_callable_uncached)
 
@@ -214,7 +214,17 @@ def log_elapsed_time(fmt: str):
 
 @profiler.annotate_function
 def lower_xla_callable(fun: lu.WrappedFun, device, backend, name,
-                       donated_invars, always_lower: bool, *arg_specs):
+                       donated_invars, always_lower: bool, prune_unused: bool,
+                       *arg_specs):
+  """Lower into XLA.
+
+  Args:
+    always_lower: If `True`, even trivial programs (not doing any computation
+      such as lambda x: x) will be lowered into an XLA program.
+    prune_unused: If `True`, unused arguments *may* be dropped, meaning the
+      underlying XLA executable will have fewer inputs than the Python function.
+      If `False`, we won't drop any arguments.
+  """
   if device is not None and backend is not None:
     raise ValueError("can't specify both a device and a backend for jit, "
                      "got device={} and backend={}".format(device, backend))
@@ -230,7 +240,7 @@ def lower_xla_callable(fun: lu.WrappedFun, device, backend, name,
   if any(isinstance(c, core.Tracer) for c in consts):
     raise UnexpectedTracerError("Encountered an unexpected tracer.")
   # TODO(mattjj): handle argument pruning w/ dynamic shapes
-  if fun.in_type is None:
+  if fun.in_type is None and prune_unused:
     jaxpr, kept_const_idx, kept_var_idx = _prune_unused_inputs(jaxpr)
     consts = [c for i, c in enumerate(consts) if i in kept_const_idx]
     abstract_args, arg_devices = util.unzip2(
