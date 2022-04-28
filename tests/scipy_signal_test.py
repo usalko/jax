@@ -122,11 +122,34 @@ class LaxBackedScipySignalTests(jtu.JaxTestCase):
       for bp in [0, [0, 2]]))
   @jtu.skip_on_devices("rocm")  # will be fixed in rocm-5.1
   def testDetrend(self, shape, dtype, axis, type, bp):
-    rng = jtu.rand_default(self.rng())
-    args_maker = lambda: [rng(shape, dtype)]
-    osp_fun = partial(osp_signal.detrend, axis=axis, type=type, bp=bp)
-    jsp_fun = partial(jsp_signal.detrend, axis=axis, type=type, bp=bp)
-    tol = {np.float32: 1e-5, np.float64: 1e-12}
+    signal = np.random.normal(loc=2, size=shape)
+
+    if type == 'constant':
+      noise = np.ones_like(signal)
+    elif type == 'linear':
+      noise = np.linspace(-2.0, -1.0, shape[0])
+      if len(shape) == 1:
+        noise = np.broadcast_to(noise, shape)
+      elif len(shape) == 2:
+        noise = np.broadcast_to(noise[:, None], shape)
+      elif len(shape) == 3:
+        noise = np.broadcast_to(noise[:, None, None], shape)
+
+    args_maker = lambda: [signal, noise]
+
+    def osp_fun(signal, noise):
+      return osp_signal.detrend(
+          signal + noise, axis=axis, type=type, bp=bp) - noise
+
+    def jsp_fun(signal, noise):
+      return jsp_signal.detrend(
+          signal + noise, axis=axis, type=type, bp=bp) - noise
+
+    if jtu.device_under_test() == 'tpu':
+      tol = {np.float32: 3e-3, np.float64: 1e-12}
+    else:
+      tol = {np.float32: 1e-5, np.float64: 1e-12}
+
     self._CheckAgainstNumpy(osp_fun, jsp_fun, args_maker, tol=tol)
     self._CompileAndCheck(jsp_fun, args_maker, rtol=tol, atol=tol)
 
