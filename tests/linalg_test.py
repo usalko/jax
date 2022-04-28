@@ -544,16 +544,21 @@ class NumpyLinalgTest(jtu.JaxTestCase):
       for hermitian in ([False, True] if m == n else [False])))
   @jtu.skip_on_devices("rocm")  # will be fixed in ROCm-5.1
   def testSVD(self, b, m, n, dtype, full_matrices, compute_uv, hermitian):
+    # TODO: enable after linking lax.svd to lax.linalg.svd
     if (jnp.issubdtype(dtype, np.complexfloating) and
-        jtu.device_under_test() == "tpu"):
-      raise unittest.SkipTest("No complex SVD implementation")
+       jtu.device_under_test() == "tpu"):
+     raise unittest.SkipTest("No complex SVD implementation")
+
     rng = jtu.rand_default(self.rng())
     args_maker = lambda: [rng(b + (m, n), dtype)]
 
-    # Norm, adjusted for dimension and type.
-    def norm(x):
-      norm = np.linalg.norm(x, axis=(-2, -1))
-      return norm / (max(1, m, n) * jnp.finfo(dtype).eps)
+    def compute_max_backward_error(operand, reconstructed_operand):
+      error_norm = np.linalg.norm(operand - reconstructed_operand,
+                                  axis=(-2, -1))
+      backward_error = (error_norm /
+                        np.linalg.norm(operand, axis=(-2, -1)))
+      max_backward_error = np.amax(backward_error)
+      return max_backward_error
 
     a, = args_maker()
     if hermitian:
@@ -562,38 +567,54 @@ class NumpyLinalgTest(jtu.JaxTestCase):
                          hermitian=hermitian)
     if compute_uv:
       # Check the reconstructed matrices
-      if full_matrices:
-        k = min(m, n)
-        if m < n:
-          self.assertTrue(np.all(
-              norm(a - np.matmul(out[1][..., None, :] * out[0], out[2][..., :k, :])) < 50))
+      if m and n:
+        if full_matrices:
+          k = min(m, n)
+          if m < n:
+            max_backward_error = compute_max_backward_error(
+                a, np.matmul(out[1][..., None, :] * out[0], out[2][..., :k, :]))
+            self.assertLess(max_backward_error, 1E-3)
+          else:
+            max_backward_error = compute_max_backward_error(
+                a, np.matmul(out[1][..., None, :] * out[0][..., :, :k], out[2]))
+            self.assertLess(max_backward_error, 1E-3)
         else:
-          self.assertTrue(np.all(
-              norm(a - np.matmul(out[1][..., None, :] * out[0][..., :, :k], out[2])) < 350))
-      else:
-        self.assertTrue(np.all(
-          norm(a - np.matmul(out[1][..., None, :] * out[0], out[2])) < 350))
+          max_backward_error = compute_max_backward_error(
+              a, np.matmul(out[1][..., None, :] * out[0], out[2]))
+          print(max_backward_error)
+          self.assertLess(max_backward_error, 6E-3)
 
       # Check the unitary properties of the singular vector matrices.
-      self.assertTrue(np.all(norm(np.eye(out[0].shape[-1]) - np.matmul(np.conj(T(out[0])), out[0])) < 15))
+      unitary_mat = np.real(np.matmul(np.conj(T(out[0])), out[0]))
+      eye_slice = np.eye(out[0].shape[-1], dtype=unitary_mat.dtype)
+      self.assertAllClose(np.broadcast_to(eye_slice, b + eye_slice.shape),
+                          unitary_mat, rtol=1E-2, atol=1E-2)
       if m >= n:
-        self.assertTrue(np.all(norm(np.eye(out[2].shape[-1]) - np.matmul(np.conj(T(out[2])), out[2])) < 10))
+        unitary_mat = np.real(np.matmul(np.conj(T(out[2])), out[2]))
+        eye_slice = np.eye(out[2].shape[-1], dtype=unitary_mat.dtype)
+        self.assertAllClose(np.broadcast_to(eye_slice, b + eye_slice.shape),
+                            unitary_mat, rtol=1E-2, atol=1E-2)
       else:
-        self.assertTrue(np.all(norm(np.eye(out[2].shape[-2]) - np.matmul(out[2], np.conj(T(out[2])))) < 20))
-
+        unitary_mat = np.real(np.matmul(out[2], np.conj(T(out[2]))))
+        eye_slice = np.eye(out[2].shape[-2], dtype=unitary_mat.dtype)
+        self.assertAllClose(np.broadcast_to(eye_slice, b + eye_slice.shape),
+                            unitary_mat, rtol=1E-2, atol=1E-2)
     else:
-      self.assertTrue(np.allclose(np.linalg.svd(a, compute_uv=False), np.asarray(out), atol=1e-4, rtol=1e-4))
+      self.assertTrue(np.allclose(np.linalg.svd(a, compute_uv=False),
+                                  np.asarray(out), atol=1E-4, rtol=1E-4))
 
-    self._CompileAndCheck(partial(jnp.linalg.svd, full_matrices=full_matrices, compute_uv=compute_uv),
+    self._CompileAndCheck(partial(jnp.linalg.svd, full_matrices=full_matrices,
+                                  compute_uv=compute_uv),
                           args_maker)
     if not compute_uv:
       svd = partial(jnp.linalg.svd, full_matrices=full_matrices,
                     compute_uv=compute_uv)
       # TODO(phawkins): these tolerances seem very loose.
       if dtype == np.complex128:
-        jtu.check_jvp(svd, partial(jvp, svd), (a,), rtol=1e-4, atol=1e-4, eps=1e-8)
+        jtu.check_jvp(svd, partial(jvp, svd), (a,), rtol=1E-4, atol=1E-4,
+                      eps=1E-8)
       else:
-        jtu.check_jvp(svd, partial(jvp, svd), (a,), rtol=5e-2, atol=2e-1)
+        jtu.check_jvp(svd, partial(jvp, svd), (a,), rtol=5E-2, atol=2E-1)
 
     if jtu.device_under_test() == "tpu":
       raise unittest.SkipTest("TPU matmul does not have enough precision")
@@ -610,9 +631,9 @@ class NumpyLinalgTest(jtu.JaxTestCase):
         return jnp.matmul(jnp.matmul(u, vdiag(s)), v).real
       _, t_out = jvp(f, (1.,), (1.,))
       if dtype == np.complex128:
-        atol = 1e-13
+        atol = 1E-13
       else:
-        atol = 5e-4
+        atol = 5E-4
       self.assertArraysAllClose(t_out, b.real, atol=atol)
 
   def testJspSVDBasic(self):
@@ -728,6 +749,7 @@ class NumpyLinalgTest(jtu.JaxTestCase):
       for dtype in float_types + complex_types))
   @jtu.skip_on_devices("gpu")  # TODO(#2203): numerical errors
   def testCond(self, shape, pnorm, dtype):
+    # TODO: enable after linking lax.svd to lax.linalg.svd
     if (jnp.issubdtype(dtype, np.complexfloating) and
         jtu.device_under_test() == "tpu"):
       raise unittest.SkipTest("No complex SVD implementation")
@@ -838,6 +860,7 @@ class NumpyLinalgTest(jtu.JaxTestCase):
       for dtype in float_types + complex_types))
   @jtu.skip_on_devices("rocm")  # will be fixed in ROCm-5.1
   def testPinv(self, shape, dtype):
+    # TODO: enable after linking lax.svd to lax.linalg.svd
     if (jnp.issubdtype(dtype, np.complexfloating) and
         jtu.device_under_test() == "tpu"):
       raise unittest.SkipTest("No complex SVD implementation")
@@ -892,6 +915,7 @@ class NumpyLinalgTest(jtu.JaxTestCase):
       for dtype in float_types + complex_types))
   @jtu.skip_on_devices("rocm")  # will be fixed in ROCm-5.1
   def testMatrixRank(self, shape, dtype):
+    # TODO: enable after linking lax.svd to lax.linalg.svd
     if (jnp.issubdtype(dtype, np.complexfloating) and
         jtu.device_under_test() == "tpu"):
       raise unittest.SkipTest("No complex SVD implementation")
