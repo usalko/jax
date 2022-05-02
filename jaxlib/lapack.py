@@ -695,8 +695,18 @@ def gees_mhlo(a, jobvs=True, sort=False, select=None):
   jobvs = ord('V' if jobvs else 'N')
   sort = ord('S' if sort else 'N')
 
+  if etype == ir.F32Type.get():
+    fn = "lapack_sgees"
+  elif etype == ir.F64Type.get():
+    fn = "lapack_dgees"
+  elif etype == ir.ComplexType.get(ir.F32Type.get()):
+    fn = "lapack_cgees"
+  elif etype == ir.ComplexType.get(ir.F64Type.get()):
+    fn = "lapack_zgees"
+  else:
+    raise NotImplementedError("Unsupported dtype {}".format(etype))
+
   if not ir.ComplexType.isinstance(etype):
-    fn = "lapack_sgees" if etype == ir.F32Type.get() else "lapack_dgees"
     schurvecs_type = etype
     workspaces = [ir.RankedTensorType.get(dims, schurvecs_type)]
     workspace_layouts = [layout]
@@ -706,8 +716,6 @@ def gees_mhlo(a, jobvs=True, sort=False, select=None):
                                     type=ir.IndexType.get())
     ] * 2
   else:
-    fn = ("lapack_cgees" if etype == ir.ComplexType.get(ir.F32Type.get())
-          else "lapack_zgees")
     schurvecs_type = etype
     workspaces = [
         ir.RankedTensorType.get(dims, schurvecs_type),
