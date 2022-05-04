@@ -15,6 +15,7 @@
 """Tests for the library of QDWH-based polar decomposition."""
 import functools
 
+import jax
 from jax.config import config
 import jax.numpy as jnp
 import numpy as np
@@ -171,7 +172,7 @@ class QdwhTest(jtu.JaxTestCase):
           'testcase_name': '_m={}_by_n={}_log_cond={}'.format(
               m, n, log_cond),
           'm': m, 'n': n, 'log_cond': log_cond}
-      for m, n in zip([10, 12], [10, 12])
+      for m, n in zip([10, 8], [10, 8])
       for log_cond in np.linspace(1, 4, 4)))
   # TODO(tianjianlu): Fails on A100 GPU.
   @jtu.skip_on_devices("gpu")
@@ -192,7 +193,7 @@ class QdwhTest(jtu.JaxTestCase):
     _, expected_h = osp_linalg.polar(a)
 
     # Sets the test tolerance.
-    rtol = 1E6 * _QDWH_TEST_EPS
+    rtol = 1E4 * _QDWH_TEST_EPS
 
     # For rank-deficient matrix, `u` is not unique.
     with self.subTest('Test h.'):
@@ -205,10 +206,44 @@ class QdwhTest(jtu.JaxTestCase):
       np.testing.assert_almost_equal(relative_diff_a, 1E-6, decimal=5)
 
     with self.subTest('Test orthogonality.'):
-      actual_results = _dot(actual_u.T, actual_u)
+      actual_results = _dot(actual_u.T.conj(), actual_u)
       expected_results = np.eye(n)
       self.assertAllClose(
-          actual_results, expected_results, rtol=rtol, atol=1E-3)
+          actual_results, expected_results, rtol=rtol, atol=1E-6)
+
+  @parameterized.named_parameters([
+      {'testcase_name': f'_m={m}_by_n={n}_r={r}_c={c}_dtype={dtype}',
+       'm': m, 'n': n, 'r': r, 'c': c, 'dtype': dtype}
+      for m, n, r, c in zip([4, 5], [3, 2], [1, 0], [1, 0])
+      for dtype in jtu.dtypes.floating
+  ])
+  def testQdwhWithTinyElement(self, m, n, r, c, dtype):
+    """Tests qdwh on matrix with zeros and close-to-zero entries."""
+    a = jnp.zeros((m, n), dtype=dtype)
+    tiny_elem = jnp.finfo(a).tiny
+    a = a.at[r, c].set(tiny_elem)
+
+    is_symmetric = _check_symmetry(a)
+    max_iterations = 10
+
+    @jax.jit
+    def lsp_linalg_fn(a):
+      u, h, _, _ = qdwh.qdwh(
+          a, is_symmetric=is_symmetric, max_iterations=max_iterations)
+      return u, h
+
+    actual_u, actual_h = lsp_linalg_fn(a)
+
+    expected_u = jnp.zeros((m, n), dtype=dtype)
+    expected_u = expected_u.at[r, c].set(1.0)
+    with self.subTest('Test u.'):
+      np.testing.assert_array_equal(expected_u, actual_u)
+
+    expected_h = jnp.zeros((n, n), dtype=dtype)
+    expected_h = expected_h.at[r, c].set(tiny_elem)
+    with self.subTest('Test h.'):
+      np.testing.assert_array_equal(expected_h, actual_h)
+
 
 if __name__ == '__main__':
   absltest.main(testLoader=jtu.JaxTestLoader())
