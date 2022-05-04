@@ -114,6 +114,10 @@ cc_library(
 py_library(
     name = "jaxlib",
     srcs = [
+        "gpu_linalg.py",
+        "gpu_prng.py",
+        "gpu_solver.py",
+        "gpu_sparse.py",
         "init.py",
         "lapack.py",
         "pocketfft.py",
@@ -238,12 +242,6 @@ cc_library(
 
 py_library(
     name = "gpu_support",
-    srcs = [
-        "cuda_linalg.py",
-        "cuda_prng.py",
-        "cusolver.py",
-        "cusparse.py",
-    ],
     deps = [
         ":_cublas",
         ":_cuda_linalg",
@@ -255,12 +253,6 @@ py_library(
 
 py_library(
     name = "hip_gpu_support",
-    srcs = [
-        "hip_linalg.py",
-        "hip_prng.py",
-        "hipsolver.py",
-        "hipsparse.py",
-    ],
     deps = [
         ":_hip_linalg",
         ":_hip_prng",

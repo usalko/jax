@@ -191,6 +191,10 @@ def prepare_wheel(sources_path):
   copy_to_jaxlib(r.Rlocation("__main__/jaxlib/_pocketfft.so"))
   copy_to_jaxlib(r.Rlocation("__main__/jaxlib/pocketfft_flatbuffers_py_generated.py"))
   copy_to_jaxlib(r.Rlocation("__main__/jaxlib/pocketfft.py"))
+  copy_to_jaxlib(r.Rlocation("__main__/jaxlib/gpu_prng.py"))
+  copy_to_jaxlib(r.Rlocation("__main__/jaxlib/gpu_linalg.py"))
+  copy_to_jaxlib(r.Rlocation("__main__/jaxlib/gpu_solver.py"))
+  copy_to_jaxlib(r.Rlocation("__main__/jaxlib/gpu_sparse.py"))
   if r.Rlocation("__main__/jaxlib/_cusolver.so") is not None:
     copy_to_jaxlib(r.Rlocation("__main__/jaxlib/_cusolver.so"))
     copy_to_jaxlib(r.Rlocation("__main__/jaxlib/_cublas.so"))
@@ -211,24 +215,14 @@ def prepare_wheel(sources_path):
     copy_to_jaxlib(r.Rlocation("__main__/jaxlib/_hipblas.pyd"))
     copy_to_jaxlib(r.Rlocation("__main__/jaxlib/_hip_linalg.pyd"))
     copy_to_jaxlib(r.Rlocation("__main__/jaxlib/_hip_prng.pyd"))
-  if r.Rlocation("__main__/jaxlib/cusolver.py") is not None:
+  if r.Rlocation("__main__/jaxlib/_cusparse.so") is not None:
     libdevice_dir = os.path.join(jaxlib_dir, "cuda", "nvvm", "libdevice")
     os.makedirs(libdevice_dir)
     copy_file(r.Rlocation("local_config_cuda/cuda/cuda/nvvm/libdevice/libdevice.10.bc"),
               dst_dir=libdevice_dir)
-    copy_to_jaxlib(r.Rlocation("__main__/jaxlib/cusolver.py"))
-    copy_to_jaxlib(r.Rlocation("__main__/jaxlib/cuda_linalg.py"))
-    copy_to_jaxlib(r.Rlocation("__main__/jaxlib/cuda_prng.py"))
-  if r.Rlocation("__main__/jaxlib/hipsolver.py") is not None:
-    copy_to_jaxlib(r.Rlocation("__main__/jaxlib/hipsolver.py"))
-    copy_to_jaxlib(r.Rlocation("__main__/jaxlib/hip_linalg.py"))
-    copy_to_jaxlib(r.Rlocation("__main__/jaxlib/hip_prng.py"))
-  if r.Rlocation("__main__/jaxlib/_cusparse.so") is not None:
     copy_to_jaxlib(r.Rlocation("__main__/jaxlib/_cusparse.so"))
-    copy_to_jaxlib(r.Rlocation("__main__/jaxlib/cusparse.py"))
   if r.Rlocation("__main__/jaxlib/_hipsparse.so") is not None:
     copy_to_jaxlib(r.Rlocation("__main__/jaxlib/_hipsparse.so"))
-    copy_to_jaxlib(r.Rlocation("__main__/jaxlib/hipsparse.py"))
   copy_to_jaxlib(r.Rlocation("__main__/jaxlib/version.py"))
 
   mlir_dir = os.path.join(jaxlib_dir, "mlir")
