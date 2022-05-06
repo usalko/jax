@@ -78,6 +78,7 @@ py_library(
         "gpu_sparse.py",
         "init.py",
         "lapack.py",
+        "mhlo_helpers.py",
         "pocketfft.py",
         "version.py",
     ],
@@ -122,12 +123,6 @@ cc_library(
     srcs = ["lapack_kernels_using_lapack.cc"],
     deps = [":lapack_kernels"],
     alwayslink = 1,
-)
-
-py_library(
-    name = "lapack",
-    srcs = ["lapack.py"],
-    deps = ["//third_party/py/numpy"],
 )
 
 pybind_extension(
