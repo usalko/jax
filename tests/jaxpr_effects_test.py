@@ -85,6 +85,7 @@ callback_p = core.Primitive('callback')
 callback_p.multiple_results = True
 
 mlir.lowerable_effects.add('log')
+mlir.lowerable_effects.add('unordered_log')
 core.ordered_effects.add('log')
 
 @callback_p.def_impl
@@ -100,18 +101,24 @@ def _(*avals, callback, out_avals, effect):
 
 def callback_effect_lowering(ctx: mlir.LoweringRuleContext, *args, callback, out_avals, effect):
   del out_avals
-  def _token_callback(token, *args):
-    out = callback(*args)
-    flat_out = jax.tree_util.tree_leaves(out)
-    return (token, *flat_out)
-  token_in = ctx.tokens_in.get(effect)[0]
-  (token_out, *out_op), keep_alive = mlir.emit_python_callback(
-      ctx.module_context.platform, _token_callback,
-      [token_in, *args], [core.abstract_token, *ctx.avals_in],
-      [core.abstract_token, *ctx.avals_out], True)
+  if effect in core.ordered_effects:
+    def _token_callback(token, *args):
+      out = callback(*args)
+      flat_out = jax.tree_util.tree_leaves(out)
+      return (token, *flat_out)
+    token_in = ctx.tokens_in.get(effect)[0]
+    (token_out, *out_op), keep_alive = mlir.emit_python_callback(
+        ctx.module_context.platform, _token_callback,
+        [token_in, *args], [core.abstract_token, *ctx.avals_in],
+        [core.abstract_token, *ctx.avals_out], True)
+    ctx.set_tokens_out(ctx.tokens_in.update_tokens(mlir.TokenSet({effect:
+      token_out})))
+  else:
+    out_op, keep_alive = mlir.emit_python_callback(
+        ctx.module_context.platform, callback,
+        list(args), list(ctx.avals_in),
+        list(ctx.avals_out), True)
   ctx.module_context.add_keepalive(keep_alive)
-  ctx.set_tokens_out(ctx.tokens_in.update_tokens(mlir.TokenSet({effect:
-    token_out})))
   return out_op
 
 mlir.register_lowering(callback_p, callback_effect_lowering)
@@ -240,7 +247,9 @@ class HigherOrderPrimitiveTest(jtu.JaxTestCase):
       effect_p.bind(effect='foo')
       effect_p.bind(effect='bar')
       return x
-    with self.assertRaisesRegex(NotImplementedError, 'Effects not supported'):
+    with self.assertRaisesRegex(
+        ValueError,
+        "Ordered effects not supported for map primitives: {'foo'}"):
       jax.make_jaxpr(f)(jnp.arange(jax.local_device_count()))
 
   def test_xmap_inherits_effects(self):
@@ -437,14 +446,15 @@ class EffectfulJaxprLoweringTest(jtu.JaxTestCase):
       return x + 1.
     mhlo = f.lower(1.).compiler_ir(dialect='mhlo')
     input_types = mhlo.body.operations[0].type.inputs
-    # First argument should be dummy token
     self.assertLen(list(input_types), 1)
     self.assertEqual(str(input_types[0]), 'tensor<f32>')
 
-    # First output should be dummy token
+    # First output should be output token
     result_types = mhlo.body.operations[0].type.results
-    self.assertLen(list(result_types), 1)
-    self.assertEqual(str(result_types[0]), 'tensor<f32>')
+    self.assertLen(list(result_types), 2)
+    self.assertEqual(str(result_types[0]), 'tensor<0xi1>')
+    self.assertLen(list(result_types), 2)
+    self.assertEqual(str(result_types[1]), 'tensor<f32>')
 
   def test_lowered_jaxpr_with_ordered_effects_takes_in_dummy_inputs(self):
     @jax.jit
@@ -494,6 +504,30 @@ class EffectfulJaxprLoweringTest(jtu.JaxTestCase):
       effect_p.bind(effect='bar')
       return x + 1.
     self.assertEqual(f(2.), 3.)
+
+  def test_cant_jit_and_pmap_function_with_unordered_effects(self):
+    if jax.device_count() < 2:
+      raise unittest.SkipTest("Test requires >= 2 devices.")
+    @jax.jit
+    @jax.pmap
+    def f(x):
+      effect_p.bind(effect='bar')
+      return x + 1
+    with self.assertRaisesRegex(
+        NotImplementedError,
+        "Cannot execute replicated computation with effects."):
+      f(jnp.arange(jax.device_count()))
+
+  def test_cant_jit_and_pmap_function_with_ordered_effects(self):
+    @jax.jit
+    @jax.pmap
+    def f(x):
+      effect_p.bind(effect='foo')
+      return x + 1.
+    with self.assertRaisesRegex(
+        ValueError,
+        "Ordered effects not supported for map primitives: {'foo'}"):
+      f(jnp.arange(jax.device_count()))
 
   def test_runtime_tokens_should_update_after_running_effectful_function(self):
     @jax.jit
@@ -618,6 +652,57 @@ class EffectOrderingTest(jtu.JaxTestCase):
     token1, token2 = tokens
     self.assertIsNot(token1, token2)
 
+class ParallelEffectsTest(jtu.JaxTestCase):
+
+  def test_cannot_pmap_unlowerable_effect(self):
+
+    def f(x):
+      # abc is not lowerable
+      effect_p.bind(effect='abc')
+      return x
+    with self.assertRaisesRegex(
+        ValueError, "Cannot lower jaxpr with effects: {'abc'}"):
+      jax.pmap(f)(jnp.arange(jax.local_device_count()))
+
+  def test_cannot_pmap_ordered_effect(self):
+
+    def f(x):
+      # foo is lowerable and ordered
+      effect_p.bind(effect='foo')
+      return x
+    with self.assertRaisesRegex(
+        ValueError, "Ordered effects not supported in `pmap`."):
+      jax.pmap(f)(jnp.arange(jax.local_device_count()))
+
+  def test_can_pmap_unordered_effect(self):
+
+    def f(x):
+      # bar is lowerable and unordered
+      effect_p.bind(effect='bar')
+      return x
+    jax.pmap(f)(jnp.arange(jax.local_device_count()))
+
+  @jtu.skip_on_devices("tpu", "gpu")
+  def test_can_pmap_unordered_callback(self):
+    # TODO(sharadmv): remove jaxlib check when minimum version is bumped
+    # TODO(sharadmv): enable this test on GPU and TPU when backends are
+    # supported
+    if jaxlib.version < (0, 3, 8):
+      raise unittest.SkipTest("`emit_python_callback` only supported in jaxlib >= 0.3.8")
+    if jax.device_count() < 2:
+      raise unittest.SkipTest("Test requires >= 2 devices.")
+    log = set()
+    def log_value(x):
+      log.add(int(x))
+      return ()
+
+    @jax.pmap
+    def f(x):
+      callback_p.bind(
+          x, callback=log_value, effect='unordered_log', out_avals=[])
+      return x + 1
+    f(jnp.arange(2)).block_until_ready()
+    self.assertSetEqual(set([0, 1]), log)
 
 class ControlFlowEffectsTest(jtu.JaxTestCase):
 

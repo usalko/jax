@@ -44,6 +44,17 @@ def capture_stdout() -> Generator[Callable[[], str], None, None]:
 def _format_multiline(text):
   return textwrap.dedent(text).lstrip()
 
+prev_xla_flags = None
+
+def setUpModule():
+  global prev_xla_flags
+  # This will control the CPU devices. On TPU we always have 2 devices
+  prev_xla_flags = jtu.set_host_platform_device_count(2)
+
+# Reset to previous configuration in case other test modules will be run.
+def tearDownModule():
+  prev_xla_flags()
+
 class DebugPrintTest(jtu.JaxTestCase):
 
   @jtu.skip_on_devices("tpu", "gpu")
@@ -52,6 +63,7 @@ class DebugPrintTest(jtu.JaxTestCase):
       debug_print('x: {}', x)
     with capture_stdout() as output:
       f(2)
+      jax.block_effects_until_ready()
     self.assertEqual(output(), "x: 2\n")
 
   @jtu.skip_on_devices("tpu", "gpu")
@@ -60,6 +72,7 @@ class DebugPrintTest(jtu.JaxTestCase):
       debug_print('x: {x}', x=x)
     with capture_stdout() as output:
       f(2)
+      jax.block_effects_until_ready()
     self.assertEqual(output(), "x: 2\n")
 
   @jtu.skip_on_devices("tpu", "gpu")
@@ -69,6 +82,7 @@ class DebugPrintTest(jtu.JaxTestCase):
       debug_print('y: {y}', y=x + 1)
     with capture_stdout() as output:
       f(2)
+      jax.block_effects_until_ready()
     self.assertEqual(output(), "x: 2\ny: 3\n")
 
   @jtu.skip_on_devices("tpu", "gpu")
@@ -78,6 +92,7 @@ class DebugPrintTest(jtu.JaxTestCase):
       debug_print('x: {x}', x=x)
     with capture_stdout() as output:
       f(2)
+      jax.block_effects_until_ready()
     self.assertEqual(output(), "x: 2\n")
 
   @jtu.skip_on_devices("tpu", "gpu")
@@ -87,6 +102,7 @@ class DebugPrintTest(jtu.JaxTestCase):
       debug_print('x: {x}', x=x, ordered=True)
     with capture_stdout() as output:
       f(2)
+      jax.block_effects_until_ready()
     self.assertEqual(output(), "x: 2\n")
 
   @jtu.skip_on_devices("tpu", "gpu")
@@ -97,6 +113,7 @@ class DebugPrintTest(jtu.JaxTestCase):
       debug_print('x: {}', struct, ordered=True)
     with capture_stdout() as output:
       f(np.array(2, np.int32))
+      jax.block_effects_until_ready()
     self.assertEqual(output(), f"x: {str(dict(foo=np.array(2, np.int32)))}\n")
 
 class DebugPrintTransformationTest(jtu.JaxTestCase):
@@ -107,6 +124,7 @@ class DebugPrintTransformationTest(jtu.JaxTestCase):
       debug_print('hello: {}', x)
     with capture_stdout() as output:
       f(jnp.arange(2))
+      jax.block_effects_until_ready()
     self.assertEqual(output(), "hello: 0\nhello: 1\n")
 
   def test_debug_print_batching_with_diff_axes(self):
@@ -115,6 +133,7 @@ class DebugPrintTransformationTest(jtu.JaxTestCase):
       debug_print('hello: {} {}', x, y)
     with capture_stdout() as output:
       f(jnp.arange(2), jnp.arange(2)[None])
+      jax.block_effects_until_ready()
     self.assertEqual(output(), "hello: 0 [0]\nhello: 1 [1]\n")
 
   def tested_debug_print_with_nested_vmap(self):
@@ -127,12 +146,14 @@ class DebugPrintTransformationTest(jtu.JaxTestCase):
     with capture_stdout() as output:
       # Should print over 0-axis then 1-axis
       jax.vmap(jax.vmap(f))(jnp.arange(6).reshape((3, 2)))
+      jax.block_effects_until_ready()
     self.assertEqual(
         output(),
         "hello: 0\nhello: 2\nhello: 4\nhello: 1\nhello: 3\nhello: 5\n")
     with capture_stdout() as output:
       # Should print over 1-axis then 0-axis
       jax.vmap(jax.vmap(f, in_axes=0), in_axes=1)(jnp.arange(6).reshape((3, 2)))
+      jax.block_effects_until_ready()
     self.assertEqual(
         output(),
         "hello: 0\nhello: 1\nhello: 2\nhello: 3\nhello: 4\nhello: 5\n")
@@ -157,6 +178,7 @@ class DebugPrintTransformationTest(jtu.JaxTestCase):
       return x
     with capture_stdout() as output:
       jax.linear_transpose(f, 1.)(1.)
+      jax.block_effects_until_ready()
     # `debug_print` should be dropped by `partial_eval` because of no
     # output data-dependence.
     self.assertEqual(output(), "")
@@ -176,6 +198,7 @@ class DebugPrintControlFlowTest(jtu.JaxTestCase):
       return lax.scan(_body, 2, xs)
     with capture_stdout() as output:
       f(jnp.arange(2))
+      jax.block_effects_until_ready()
     self.assertEqual(output(), _format_multiline("""
       carry: 2
       x: 0
@@ -195,6 +218,7 @@ class DebugPrintControlFlowTest(jtu.JaxTestCase):
       return lax.fori_loop(0, 5, _body, x)
     with capture_stdout() as output:
       f(2)
+      jax.block_effects_until_ready()
     self.assertEqual(output(), _format_multiline("""
       x: 2
       x: 3
@@ -217,6 +241,7 @@ class DebugPrintControlFlowTest(jtu.JaxTestCase):
       return lax.while_loop(_cond, _body, x)
     with capture_stdout() as output:
       f(5)
+      jax.block_effects_until_ready()
     self.assertEqual(output(), _format_multiline("""
       x: 5
       x: 6
@@ -239,6 +264,7 @@ class DebugPrintControlFlowTest(jtu.JaxTestCase):
       return lax.while_loop(_cond, _body, x)
     with capture_stdout() as output:
       f(5)
+      jax.block_effects_until_ready()
     self.assertEqual(output(), _format_multiline("""
       x: 5
       x: 6
@@ -250,6 +276,7 @@ class DebugPrintControlFlowTest(jtu.JaxTestCase):
 
     with capture_stdout() as output:
       f(10)
+      jax.block_effects_until_ready()
     # Should run the cond once
     self.assertEqual(output(), _format_multiline("""
       x: 10
@@ -270,11 +297,13 @@ class DebugPrintControlFlowTest(jtu.JaxTestCase):
       return lax.cond(x < 5, true_fun, false_fun, x)
     with capture_stdout() as output:
       f(5)
+      jax.block_effects_until_ready()
     self.assertEqual(output(), _format_multiline("""
       false: 5
       """))
     with capture_stdout() as output:
       f(4)
+      jax.block_effects_until_ready()
     self.assertEqual(output(), _format_multiline("""
       true: 4
       """))
@@ -302,19 +331,57 @@ class DebugPrintControlFlowTest(jtu.JaxTestCase):
       """))
     with capture_stdout() as output:
       f(1)
+      jax.block_effects_until_ready()
     self.assertEqual(output(), _format_multiline("""
       b2: 1
       """))
     with capture_stdout() as output:
       f(2)
+      jax.block_effects_until_ready()
     self.assertEqual(output(), _format_multiline("""
       b3: 2
       """))
+
+class DebugPrintParallelTest(jtu.JaxTestCase):
+
+  def _assertLinesEqual(self, text1, text2):
+    self.assertSetEqual(set(text1.split("\n")), set(text2.split("\n")))
+
+  @jtu.skip_on_devices("tpu", "gpu")
+  def test_ordered_print_not_supported_in_pmap(self):
+
+    @jax.pmap
+    def f(x):
+      debug_print("{}", x, ordered=True)
+    with self.assertRaisesRegex(
+        ValueError, "Ordered effects not supported in `pmap`."):
+      f(jnp.arange(jax.local_device_count()))
+
+  @jtu.skip_on_devices("tpu", "gpu")
+  def test_unordered_print_works_in_pmap(self):
+
+    @jax.pmap
+    def f(x):
+      debug_print("hello: {}", x, ordered=False)
+    with capture_stdout() as output:
+      f(jnp.arange(jax.local_device_count()))
+      jax.block_effects_until_ready()
+    self._assertLinesEqual(output(), "hello: 0\nhello: 1\n")
+
+    @jax.pmap
+    def f2(x):
+      debug_print('hello: {}', x)
+      debug_print('hello: {}', x + 2)
+    with capture_stdout() as output:
+      f2(jnp.arange(2))
+      jax.block_effects_until_ready()
+    self._assertLinesEqual(output(), "hello: 0\nhello: 1\nhello: 2\nhello: 3\n")
 
 if jaxlib.version < (0, 3, 8):
   # No lowering for `emit_python_callback` in older jaxlibs.
   del DebugPrintTest
   del DebugPrintControlFlowTest
+  del DebugPrintParallelTest
 
 if __name__ == '__main__':
   absltest.main(testLoader=jtu.JaxTestLoader())
