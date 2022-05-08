@@ -356,9 +356,12 @@ ad.primitive_jvps[cholesky_p] = cholesky_jvp_rule
 batching.primitive_batchers[cholesky_p] = cholesky_batching_rule
 
 def _cholesky_lowering(ctx, x):
-  aval, = ctx.avals_out
-  return mhlo.CholeskyOp(mlir.aval_to_ir_type(aval), x,
-                         lower=ir.BoolAttr.get(True)).results
+  if jax._src.lib.mlir_api_version < 17:
+    aval, = ctx.avals_out
+    return mhlo.CholeskyOp(mlir.aval_to_ir_type(aval), x,
+                           lower=ir.BoolAttr.get(True)).results
+  else:
+    return mhlo.CholeskyOp(x, lower=ir.BoolAttr.get(True)).results
 
 mlir.register_lowering(cholesky_p, _cholesky_lowering)
 
