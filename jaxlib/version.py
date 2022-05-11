@@ -17,4 +17,14 @@
 # reflect the most recent available binaries.
 # __version__ should be increased after releasing the current version
 # (i.e. on main, this is always the next version to be released).
+
+import datetime
+import os
+
 __version__ = "0.3.11"
+
+nightly = os.environ.get('JAXLIB_NIGHTLY')
+if nightly:
+  # Version as `X.Y.Z.dev20220510`
+  datestring = datetime.datetime.now().strftime('%Y%m%d')
+  __version__ = f'{__version__}.dev{datestring}'
