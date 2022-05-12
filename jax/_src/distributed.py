@@ -19,7 +19,9 @@ from jax._src.lib import xla_bridge
 from jax._src.lib import xla_client
 from jax._src.lib import xla_extension
 
-_service = None
+jax_service = None
+distributed_client = None
+
 def initialize(coordinator_address: str, num_processes: int, process_id: int):
   """Initialize distributed system for topology discovery.
 
@@ -48,20 +50,34 @@ def initialize(coordinator_address: str, num_processes: int, process_id: int):
   >>> jax.distributed.initialize('10.0.0.1:1234', 2, 1)  # doctest: +SKIP
   """
   if process_id == 0:
-    global _service
-    assert _service is None, 'initialize should be called once only'
+    global jax_service
+    if jax_service is not None:
+      logging.info('JAX service is already running on process 0')
+      return
+
     logging.info('Starting JAX distributed service on %s', coordinator_address)
-    _service = xla_extension.get_distributed_runtime_service(coordinator_address,
-                                                             num_processes)
+    jax_service = xla_extension.get_distributed_runtime_service(
+        coordinator_address, num_processes)
 
-  client = xla_extension.get_distributed_runtime_client(coordinator_address,
-                                                        process_id)
+  global distributed_client
+  if distributed_client is not None:
+    logging.info('JAX client is already running.')
+    return
+
+  distributed_client = xla_extension.get_distributed_runtime_client(
+      coordinator_address, process_id)
   logging.info('Connecting to JAX distributed service on %s', coordinator_address)
-  client.connect()
+  distributed_client.connect()
 
-  factory = functools.partial(xla_client.make_gpu_client, client, process_id,
-                              platform_name='cuda')
+  factory = functools.partial(
+      xla_client.make_gpu_client,
+      distributed_client,
+      process_id,
+      platform_name='cuda')
   xla_bridge.register_backend_factory('cuda', factory, priority=300)
-  factory = functools.partial(xla_client.make_gpu_client, client, process_id,
-                              platform_name='rocm')
+  factory = functools.partial(
+      xla_client.make_gpu_client,
+      distributed_client,
+      process_id,
+      platform_name='rocm')
   xla_bridge.register_backend_factory('rocm', factory, priority=300)
