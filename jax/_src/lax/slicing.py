@@ -1935,9 +1935,10 @@ def _scatter_lower(ctx, operand, indices, updates, *,
     inserted_window_dims=list(dnums.inserted_window_dims),
     scattered_dims_to_operand_dims=list(dnums.scatter_dims_to_operand_dims),
     index_vector_dim=len(ctx.avals_in[1].shape) - 1)
-  op = mhlo.ScatterOp(mlir.aval_to_ir_type(aval_out), operand, indices, updates,
-                      scatter_dnums, ir.BoolAttr.get(indices_are_sorted),
-                      ir.BoolAttr.get(unique_indices))
+  op = mhlo.ScatterOp(
+      mlir.aval_to_ir_type(aval_out), [operand], indices, [updates],
+      scatter_dnums, ir.BoolAttr.get(indices_are_sorted),
+      ir.BoolAttr.get(unique_indices))
   scalar_type = mlir.aval_to_ir_type(core.ShapedArray((), aval_out.dtype))
   update = op.update_computation.blocks.append(scalar_type, scalar_type)
   with ir.InsertionPoint(update):
@@ -1988,8 +1989,8 @@ def _scatter_add_lower_gpu(ctx, operand, indices, updates,
       core.ShapedArray(aval_out.shape, real_dtype))
 
   def _scatter(operand_part, updates_part):
-    scatter = mhlo.ScatterOp(operand_type_part, operand_part, indices,
-                             updates_part, scatter_dnums,
+    scatter = mhlo.ScatterOp(operand_type_part, [operand_part], indices,
+                             [updates_part], scatter_dnums,
                              ir.BoolAttr.get(indices_are_sorted),
                              ir.BoolAttr.get(unique_indices))
     scalar_type = mlir.aval_to_ir_type(core.ShapedArray((), real_dtype))
