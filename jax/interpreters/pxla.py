@@ -2499,6 +2499,28 @@ def resource_typecheck(jaxpr, resource_env, axis_resources, what_jaxpr_thunk):
       _check_aval(v.aval, what_thunk)
 
 
+def new_mesh_sharding_specs(axis_sizes, axis_names):
+  mesh_axis_pos = {name: i for i, name in enumerate(axis_names)}
+  # NOTE: This takes in the non-sharded avals!
+  def mk_sharding_spec(num_dimensions, aval_axes):
+    mesh_mapping = [Replicated(axis_size) for axis_size in axis_sizes.values()]
+    sharding = [_UNSHARDED_INSTANCE] * num_dimensions
+    next_sharded_axis = 0
+    # NOTE: sorted is stable, which is important when multiple resources
+    #       map to the same axis.
+    for name, axis in sorted(aval_axes.items(), key=lambda x: x[1]):
+      chunked = sharding[axis]
+      if isinstance(chunked, NoSharding):
+        chunked = Chunked([])
+      sharding[axis] = Chunked(list(chunked.chunks) + [axis_sizes[name]])
+      assert isinstance(mesh_mapping[mesh_axis_pos[name]], Replicated), \
+          "Value mapped to the same mesh axis twice"
+      mesh_mapping[mesh_axis_pos[name]] = ShardedAxis(next_sharded_axis)
+      next_sharded_axis += 1
+    return ShardingSpec(sharding, mesh_mapping)
+  return mk_sharding_spec
+
+
 def mesh_sharding_specs(axis_sizes, axis_names, allow_uneven_axes=False):
   mesh_axis_pos = {name: i for i, name in enumerate(axis_names)}
   # NOTE: This takes in the non-sharded avals!
