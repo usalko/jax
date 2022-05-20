@@ -260,47 +260,23 @@ class GlobalAsyncCheckpointManager:
       for future in self._commit_futures:
         for f in future:
           f.result()
-      logging.info('Commit to storage layer has completed.')
 
       current_process = jax.process_index()
+      logging.info('Commit to storage layer has completed by process: %s',
+                   current_process)
 
-      # TODO(yashkatariya): Add a method to the distributed system to wait for
-      # the key's value to change.
-      # Value already exists -- wait until value is NOT _REMOVED_VALUE.
-      with _RetryWithTimeout(self._timeout_secs) as t:
-        while self._client.blocking_key_value_get(
-            _get_key(str(current_process)), self._timeout_in_ms) == _REMOVED_VALUE:
-          if t.timed_out:
-            raise TimeoutError('Terminating after waiting for '
-                               f'{self._timeout_secs} secs for lock value to appear.')
-          logging.info('Waiting for current process %s lock value to appear.',
-                       current_process)
-          time.sleep(60)
-
-      self._client.key_value_set(_get_key(str(current_process)), _REMOVED_VALUE)
+      self._client.blocking_key_value_del(_get_key(str(current_process)),
+                                          self._timeout_in_ms)
       logging.info('Lock value removed for process %s', current_process)
 
       # This while loop will not trigger until all commits have finished.
       if current_process == 0:
-        with _RetryWithTimeout(self._timeout_secs) as t:
-          while True:
-            if t.timed_out:
-              raise TimeoutError('Terminating after waiting for '
-                                 f'{self._timeout_secs} secs for '
-                                 'finishing the serialization.')
-            # Mark as done when no lock values exist.
-            if all(
-                self._client.blocking_key_value_get(
-                    _get_key(str(p)), self._timeout_in_ms) == _REMOVED_VALUE
-                for p in range(jax.process_count())):
-              logging.info('Renaming %s to %s', temp_checkpoint_dir, final_checkpoint_dir)
-              tf.io.gfile.rename(temp_checkpoint_dir, final_checkpoint_dir)
-              logging.info('Finished saving GDA checkpoint to `%s`.', final_checkpoint_dir)
-              self._client.key_value_set(_get_key(self._final_ckpt_dir), _CHECKPOINT_SUCCESS)
-              break
-            else:
-              logging.info('Thread sleeping for 60 seconds.')
-              time.sleep(60)
+        all_keys = [_get_key(str(p)) for p in range(jax.process_count())]
+        self._client.blocking_key_value_all_not_exists(all_keys, self._timeout_in_ms)
+        logging.info('Renaming %s to %s', temp_checkpoint_dir, final_checkpoint_dir)
+        tf.io.gfile.rename(temp_checkpoint_dir, final_checkpoint_dir)
+        logging.info('Finished saving GDA checkpoint to `%s`.', final_checkpoint_dir)
+        self._client.key_value_set(_get_key(self._final_ckpt_dir), _CHECKPOINT_SUCCESS)
 
     except Exception as e:
       self._exception = e
