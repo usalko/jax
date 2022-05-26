@@ -93,10 +93,17 @@ class PjitLowered(stages.Lowered):
                         no_kwargs=self._no_kwargs)
 
 
+class _DefaultValue:
+  pass
+_DEFAULT = _DefaultValue()
+def _is_default(x):
+  return isinstance(x, _DefaultValue)
+
+
 # TODO(yashkatariya): Add pjit microbenchmarks.
 def pjit(fun: Callable,
-         in_axis_resources,
-         out_axis_resources,
+         in_axis_resources=_DEFAULT,
+         out_axis_resources=_DEFAULT,
          static_argnums: Union[int, Sequence[int]] = (),
          donate_argnums: Union[int, Sequence[int]] = ()) -> stages.Wrapped:
   """Makes ``fun`` compiled and automatically partitioned across multiple devices.
@@ -215,6 +222,13 @@ def pjit(fun: Callable,
   [ 0.5  2.   4.   6.   8.  10.  12.  10. ]
   """
   _check_callable(fun)
+
+  # in_axis_resources and out_axis_resources can't be None as the default value
+  # because `None` means that the input is fully replicated.
+  if not config.jax_array and (_is_default(in_axis_resources) or
+                               _is_default(out_axis_resources)):
+    raise ValueError('in_axis_resources and out_axis_resouces should not '
+                     'be the default singleton value.')
 
   if isinstance(in_axis_resources, list):
     # To be a tree prefix of the positional args tuple, in_axes can never be a
