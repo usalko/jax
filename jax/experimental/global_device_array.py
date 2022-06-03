@@ -119,12 +119,6 @@ def get_shard_shape(global_shape, global_mesh, mesh_axes) -> Shape:
   return tuple(chunk_size)
 
 
-def _set_aval(val):
-  if val.aval is None:
-    val.aval = core.ShapedArray(val.shape, val.dtype)
-  return val
-
-
 @dataclasses.dataclass(frozen=True)
 class Shard:
   """A single data shard of a GlobalDeviceArray.
@@ -355,7 +349,7 @@ class GlobalDeviceArray:
 
     out = []
     for db in self._device_buffers:
-      db = _set_aval(db)
+      db = pxla._set_aval(db)
       device = db.device()
       index, rid = global_indices_rid[device]
       out.append(Shard(device, index, rid, db))
@@ -389,28 +383,12 @@ class GlobalDeviceArray:
     return global_shards
 
   def local_data(self, index) -> DeviceArray:
-    return _set_aval(self._device_buffers[index])
+    return pxla._set_aval(self._device_buffers[index])
 
   def block_until_ready(self):
     for db in self._device_buffers:
       db.block_until_ready()
     return self
-
-  def _value(self):
-    if not config.jax_array:
-      raise NotImplementedError('Please set `jax_array` config option to True '
-                                'to use this feature.')
-    if self.mesh.is_multi_process:
-      raise RuntimeError("Fetching value for GDA that spans non-addressable "
-                         "devices is not possible. You can use "
-                         "`jax.experimental.multihost_utils.process_allgather` "
-                         "for this use case.")
-    unique_shards = [s.data.copy_to_host_async() or s
-                     for s in self.local_shards if s.replica_id == 0]
-    npy_value = np.empty(self.shape, self.dtype)
-    for s in unique_shards:
-      npy_value[s.index] = s.data.to_py()
-    return npy_value
 
   @classmethod
   def from_callback(cls, global_shape: Shape, global_mesh: pxla.Mesh,
