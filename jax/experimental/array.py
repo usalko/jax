@@ -18,12 +18,14 @@ import dataclasses
 import numpy as np
 from typing import Sequence, Tuple, Callable, Union, Optional
 
+from jax import core
 from jax._src.config import config
 from jax._src.util import prod
 from jax._src.lib import xla_client as xc
 from jax._src.api import device_put
-from jax.interpreters import pxla
-from jax.experimental.sharding import Sharding, SingleDeviceSharding, XLACompatibleSharding
+from jax.interpreters import pxla, xla
+from jax.experimental.sharding import (Sharding, SingleDeviceSharding,
+                                       XLACompatibleSharding, MeshPspecSharding)
 
 Shape = Tuple[int, ...]
 Device = xc.Device
@@ -108,7 +110,7 @@ class Array:
       rid = device_to_replica_id[device]
       # Wrap the device arrays in `Array` until C++ returns an Array instead
       # of a DA.
-      array = Array(db.aval, SingleDeviceSharding(device), [db], committed=True)
+      array = Array(db.shape, SingleDeviceSharding(device), [db], committed=True)
       out.append(Shard(device, index, rid, array))
     return out
 
@@ -139,3 +141,19 @@ def make_array_from_callback(shape: Shape, sharding: Sharding,
       for device in sharding.addressable_devices
   ]
   return Array(shape, sharding, dbs, committed=True)
+
+
+core.pytype_aval_mappings[Array] = lambda x: core.ShapedArray(x.shape, x.dtype)
+xla.pytype_aval_mappings[Array] = lambda x: core.ShapedArray(x.shape, x.dtype)
+xla.canonicalize_dtype_handlers[Array] = pxla.identity
+
+def _array_shard_arg(x, devices, indices):
+  return [d for d in x._arrays]
+pxla.shard_arg_handlers[Array] = _array_shard_arg
+
+
+def _array_result_handler(global_aval, out_axis_resources, global_mesh):
+  sharding = MeshPspecSharding(global_mesh, out_axis_resources)
+  return lambda bufs: Array(global_aval.shape, sharding, bufs, committed=True)
+pxla.global_result_handlers[core.ShapedArray] = _array_result_handler
+pxla.global_result_handlers[core.ConcreteArray] = _array_result_handler
