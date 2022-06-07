@@ -406,6 +406,13 @@ def _is_auto(x):
   return isinstance(x, _AUTOAxisResource)
 
 
+class _UnspecifiedValue:
+  pass
+_UNSPECIFIED = _UnspecifiedValue()
+
+def _is_unspecified(x):
+  return isinstance(x, _UnspecifiedValue)
+
 """
 ArrayMapping specifies how an ndarray should map to mesh axes.
 
@@ -422,7 +429,8 @@ mesh devices without any modifications. If the mapping was {'y': 1, 'x': 1}, the
 mesh devices ndarray would have to be transposed before flattening and assignment.
 """
 ArrayMapping = OrderedDictType[MeshAxisName, int]
-ArrayMappingOrAuto = Union[ArrayMapping, _AUTOAxisResource]
+ArrayMappingOrAutoOrUnspecified = Union[ArrayMapping, _AUTOAxisResource,
+                                        _UnspecifiedValue]
 
 
 def array_mapping_to_axis_resources(array_mapping: ArrayMapping):
@@ -490,14 +498,18 @@ def global_aval_to_result_handler(
     for this output. The function will return an object suitable for returning
     to the user, e.g. a ShardedDeviceArray.
   """
+  if config.jax_array:
+    output_type = 'Array'
+  elif config.jax_parallel_functions_output_gda:
+    output_type = 'GlobalDeviceArray'
   try:
-    return global_result_handlers[type(aval)](aval, out_axis_resources,
-                                              global_mesh)
+    return global_result_handlers[(type(aval), output_type)](
+        aval, out_axis_resources, global_mesh)
   except KeyError as err:
     raise TypeError(
         f"No pxla_result_handler for type: {type(aval)}") from err
 
-global_result_handlers: Dict[Type[core.AbstractValue], PxlaResultHandler] = {}
+global_result_handlers: Dict[Tuple[Type[core.AbstractValue], str], PxlaResultHandler] = {}
 
 ### lazy device-memory persistence and result handling
 
@@ -1433,7 +1445,7 @@ def local_avals_to_results_handler(
 def global_avals_to_results_handler(global_out_avals: Sequence[ShapedArray],
                                     out_axes: Sequence[ArrayMapping],
                                     global_mesh):
-  if config.jax_parallel_functions_output_gda:
+  if config.jax_parallel_functions_output_gda or config.jax_array:
     global_sharding_spec = mesh_sharding_specs(global_mesh.shape, global_mesh.axis_names)
     global_out_specs = [global_sharding_spec(aval, oa)
                         for aval, oa in safe_zip(global_out_avals, out_axes)]
@@ -2144,8 +2156,8 @@ def lower_mesh_computation(
     api_name: str,
     fun_name: str,
     mesh: Mesh,
-    in_axes: Sequence[ArrayMappingOrAuto],
-    out_axes: Sequence[ArrayMappingOrAuto],
+    in_axes: Sequence[ArrayMappingOrAutoOrUnspecified],
+    out_axes: Sequence[ArrayMappingOrAutoOrUnspecified],
     donated_invars: Sequence[bool],
     spmd_lowering: bool,
     global_in_avals: Sequence[core.ShapedArray],
@@ -2219,7 +2231,8 @@ def lower_mesh_computation(
     # TODO(yashkatariya): Fix the HLO produced if out_partitions is
     # [None, OpShardingProto] has the sharding annotations.
     out_partitions = [
-        None if _is_auto(aval_out_axes) else global_sharding_spec(aval, aval_out_axes).sharding_proto()
+        (None if _is_auto(aval_out_axes) or _is_unspecified(aval_out_axes) else
+         global_sharding_spec(aval, aval_out_axes).sharding_proto())
         for aval, aval_out_axes in safe_zip(global_out_avals, out_axes)
     ]
     replicated_args = [False] * len(in_jaxpr_avals)
@@ -2351,8 +2364,8 @@ class MeshExecutable(stages.Executable):
                mesh: Mesh,
                global_in_avals: Sequence[ShapedArray],
                global_out_avals: Sequence[ShapedArray],
-               in_axes: Sequence[ArrayMappingOrAuto],
-               out_axes: Sequence[ArrayMappingOrAuto],
+               in_axes: Sequence[ArrayMappingOrAutoOrUnspecified],
+               out_axes: Sequence[ArrayMappingOrAutoOrUnspecified],
                spmd_lowering: bool,
                tuple_args: bool,
                in_is_global: Sequence[bool],
@@ -2399,7 +2412,7 @@ class MeshExecutable(stages.Executable):
                                      "in {elapsed_time} sec"):
         xla_executable = dispatch.compile_or_get_cached(backend, computation, compile_options)
 
-      if auto_spmd_lowering:
+      if auto_spmd_lowering or all(_is_unspecified(o) for o in out_axes):
         in_axes, out_axes = _get_array_mapping_from_executable(xla_executable, mesh)
 
       input_specs, input_indices, input_avals = _get_input_metadata(
