@@ -21,6 +21,7 @@ from functools import partial
 
 from jax.experimental import maps
 from jax.experimental.global_device_array import GlobalDeviceArray as GDA
+from jax.experimental.array import Array
 from jax import core
 from jax import linear_util as lu
 from jax import stages
@@ -93,11 +94,29 @@ class PjitLowered(stages.Lowered):
                         no_kwargs=self._no_kwargs)
 
 
-class _UnspecifiedValue:
-  pass
-_UNSPECIFIED = _UnspecifiedValue()
-def _is_unspecified(x):
-  return isinstance(x, _UnspecifiedValue)
+_UnspecifiedValue = pxla._UnspecifiedValue
+_UNSPECIFIED = pxla._UNSPECIFIED
+_is_unspecified = pxla._is_unspecified
+
+def _is_unspecified_or_from_gda_or_auto(x):
+  return _is_from_gda(x) or _is_auto(x) or _is_unspecified(x)
+
+
+def _check_all_or_none_unspecified(axis_resources, name):
+  if not axis_resources:
+    return False
+  unspecified_count = 0
+  unspecified = _is_unspecified(axis_resources[0])
+  for resource in axis_resources:
+    current_is_unspecified = _is_unspecified(resource)
+    if current_is_unspecified:
+      unspecified_count += 1
+      assert unspecified_count == 1
+    if current_is_unspecified != unspecified:
+      raise ValueError(f'`pjit._UNSPECIFIED` exists in {name}. '
+                       f'Make sure that every entry in {name} is '
+                       '`pjit._UNSPECIFIED`.')
+  return unspecified
 
 
 # TODO(yashkatariya): Add pjit microbenchmarks.
@@ -243,6 +262,10 @@ def pjit(fun: Callable,
   out_axis_resources, _, _, _ = _prepare_axis_resources(
       out_axis_resources, "out_axis_resources")
 
+    # Duck type `UNSPECIFIED` with `FROM_GDA` to use that codepath for `Array`.
+  if config.jax_array and _is_unspecified(in_axis_resources):
+    in_axis_resources = FROM_GDA
+
   static_argnums = _ensure_index_tuple(static_argnums)
   donate_argnums = _ensure_index_tuple(donate_argnums)
   donate_argnums = rebase_donate_argnums(donate_argnums, static_argnums)
@@ -273,7 +296,13 @@ def pjit(fun: Callable,
     else:
       donated_invars = (False,) * len(args_flat)
 
-    _maybe_check_pjit_gda_mesh(args_flat, mesh)
+    if config.jax_array:
+      if any(not isinstance(a, Array) for a in args_flat):
+        raise ValueError('All arguments to pjit when `config.jax_array` is '
+                         'enabled should be `Array`s.')
+
+    # TODO(yashkatariya): Check device_set for Array instead of the mesh.
+    _maybe_check_pjit_gda_or_array_mesh(args_flat, mesh)
 
     # TODO(yashkatariya): Make sure you are not checking explicitly for `ShapedArray`.
     # One possibility, is to only allow GDA and fully replicated inputs for AUTO.
@@ -285,17 +314,18 @@ def pjit(fun: Callable,
     local_in_avals = tuple(shaped_abstractify(a) for a in args_flat)
     # TODO(yashkatariya): This is a hack. This should go away when avals have
     # is_global attribute.
-    if _global_avals:
+    if _global_avals or config.jax_array:
       in_positional_semantics = (maps._PositionalSemantics.GLOBAL,) * len(args_flat)
     else:
       in_positional_semantics = tuple(tree_map(_get_in_positional_semantics, args_flat))
     out_positional_semantics = (
         maps._PositionalSemantics.GLOBAL
-        if config.jax_parallel_functions_output_gda else maps._positional_semantics.val)
+        if config.jax_parallel_functions_output_gda or config.jax_array else
+        maps._positional_semantics.val)
 
     global_in_avals, canonicalized_in_axis_resources_flat = _process_in_axis_resources(
         mesh, local_in_avals, hashable_pytree(in_axis_resources), in_tree,
-        in_positional_semantics, tuple(isinstance(a, GDA) for a in args_flat))
+        in_positional_semantics, tuple(isinstance(a, (GDA, Array)) for a in args_flat))
 
     jaxpr, canonicalized_out_axis_resources_flat = _pjit_jaxpr(
         flat_fun, mesh, global_in_avals, HashableFunction(out_tree, closure=()),
@@ -592,10 +622,14 @@ def _prepare_axis_resources(axis_resources,
   # PyTrees don't treat None values as leaves, so we use an is_leaf function.
   entries, treedef = tree_flatten(axis_resources, is_leaf=lambda x: x is None)
   what = f"{arg_name} leaf specifications"
+  # All entries should be specified or if unspecified then there should only
+  # be 1 entry for that since _UNSPECIFIED is a private API.
+  _check_all_or_none_unspecified(entries, arg_name)
   any_auto = pxla._check_if_any_auto(entries)
   entries = [
-      entry if _is_from_gda(entry) or _is_auto(entry) else ParsedPartitionSpec.from_user_input(
-          entry, what, allow_unconstrained_dims=allow_unconstrained_dims)
+      (entry if _is_unspecified_or_from_gda_or_auto(entry)
+       else ParsedPartitionSpec.from_user_input(
+          entry, what, allow_unconstrained_dims=allow_unconstrained_dims))
       for entry in entries
   ]
   _check_unique_resources(entries, arg_name)
@@ -610,8 +644,7 @@ def _check_resources_mismatch(in_axis_resources_flat, is_gda):
 def _check_unique_resources(axis_resources, arg_name):
   for arg_axis_resources in axis_resources:
     if not arg_axis_resources: continue
-    if _is_from_gda(arg_axis_resources): continue
-    if _is_auto(arg_axis_resources): continue
+    if _is_unspecified_or_from_gda_or_auto(arg_axis_resources): continue
     constrained_dims = [d for d in arg_axis_resources if d is not None]
     resource_counts = Counter(it.chain.from_iterable(constrained_dims))
     if not resource_counts: continue
@@ -627,9 +660,7 @@ def _check_shapes_against_resources(what: str, is_global_shape: bool,
                                     allow_uneven_sharding: bool):
   global_str = " global" if is_global_shape else ""
   for aval, aval_axis_resources in zip(flat_avals, flat_axis_resources):
-    if _is_from_gda(aval_axis_resources):
-      continue
-    if _is_auto(aval_axis_resources):
+    if _is_unspecified_or_from_gda_or_auto(aval_axis_resources):
       continue
     shape = aval.shape
     if len(shape) < len(aval_axis_resources):
@@ -663,9 +694,14 @@ def _pjit_call_impl(*args, jaxpr,
                     resource_env, donated_invars, name,
                     in_positional_semantics, out_positional_semantics):
   in_is_global = _calc_is_global_sequence(in_positional_semantics, in_axis_resources)
+  if config.jax_array and all(_is_unspecified(o) for o in out_axis_resources):
+    _allow_propagation_to_outputs = True
+  else:
+    _allow_propagation_to_outputs = False
   compiled = _pjit_lower(
       jaxpr, in_axis_resources, out_axis_resources,
-      resource_env, donated_invars, name, in_is_global).compile()
+      resource_env, donated_invars, name, in_is_global).compile(
+          _allow_propagation_to_outputs=_allow_propagation_to_outputs)
   # This check is expensive so only do it if enable_checks is on.
   if compiled._auto_spmd_lowering and config.jax_enable_checks:
     pxla._check_gda_xla_sharding_match(args, compiled._in_axes)
@@ -1080,10 +1116,12 @@ pxla.custom_resource_typing_rules[sharding_constraint_p] = \
 
 # -------------------- helpers --------------------
 
-def get_array_mapping(axis_resources: Union[ParsedPartitionSpec, _AUTOAxisResource]) -> pxla.ArrayMappingOrAuto:
+def get_array_mapping(
+    axis_resources: Union[ParsedPartitionSpec, _AUTOAxisResource, _UnspecifiedValue]
+) -> pxla.ArrayMappingOrAutoOrUnspecified:
   # TODO(yashkatariya): Use `TypeGuard` on `_is_auto` when it is supported.
   # Don't use `_is_auto` here to satisfy pytype and mypy.
-  if isinstance(axis_resources, _AUTOAxisResource):
+  if isinstance(axis_resources, (_AUTOAxisResource, _UnspecifiedValue)):
     return axis_resources
   return OrderedDict((axis, i)
                      for i, axes in enumerate(axis_resources)
@@ -1138,37 +1176,44 @@ def _get_in_positional_semantics(arg) -> maps._PositionalSemantics:
   return maps._positional_semantics.val
 
 def _create_cpspec(x):
-  return x if _is_from_gda(x) or _is_auto(x) else CanonicalizedParsedPartitionSpec(x)
+  return x if _is_unspecified_or_from_gda_or_auto(x) else CanonicalizedParsedPartitionSpec(x)
 
 def _maybe_replace_from_gda_with_pspec(
     in_axis_resources_flat: Union[CanonicalizedParsedPartitionSpec, _AUTOAxisResource],
     arg) -> Union[CanonicalizedParsedPartitionSpec, _AUTOAxisResource]:
-  if isinstance(arg, GDA):
+  if isinstance(arg, (GDA, Array)):
     # TODO(yashkatariya): Use `TypeGuard` on `_is_auto` when it is supported.
     # Don't use `_is_auto` here to satisfy pytype and mypy.
     if isinstance(in_axis_resources_flat, _AUTOAxisResource):
       return in_axis_resources_flat
-    gda_cpspec = CanonicalizedParsedPartitionSpec(
+
+    # TODO(yashkatariya): Don't use `spec` from `MeshPspecSharding`. Write a
+    # sharding inference handler that will work with any sharding.
+    gda_or_array_cpspec = CanonicalizedParsedPartitionSpec(
         ParsedPartitionSpec.from_user_input(
-            arg.mesh_axes, arg_name="GDA mesh_axes"))
-    assert type(gda_cpspec) is CanonicalizedParsedPartitionSpec
+            arg.mesh_axes if hasattr(arg, 'mesh_axes') else arg.sharding.spec,
+            arg_name="GDA/Array spec"))
     if (not _is_from_gda(in_axis_resources_flat) and
-        in_axis_resources_flat != gda_cpspec):
+        in_axis_resources_flat != gda_or_array_cpspec):
       raise ValueError(
-          'Got an input GDA to pjit with different partitioning than specified in '
+          'Got an input GDA/Array to pjit with different partitioning than specified in '
           "the in_axis_resources argument to pjit. The partitioning must match, or "
-          "use `jax.experimental.pjit.FROM_GDA` in `in_axis_resources`. "
-          f"Got GDA spec: {gda_cpspec.user_spec} and "
-          f"pjit spec: {in_axis_resources_flat.user_spec} for GDA: {arg}")
-    return gda_cpspec
+          "use `jax.experimental.pjit.FROM_GDA` in `in_axis_resources` or leave "
+          "in_axis_resources empty."
+          f"Got GDA/Array spec: {gda_or_array_cpspec.user_spec} and "
+          f"pjit spec: {in_axis_resources_flat.user_spec} for GDA/Array: {arg}")
+    return gda_or_array_cpspec
   return in_axis_resources_flat
 
 
-def _maybe_check_pjit_gda_mesh(args, mesh):
+def _maybe_check_pjit_gda_or_array_mesh(args, mesh):
   for x in args:
     if isinstance(x, GDA) and x.mesh != mesh:
       raise ValueError("Pjit's mesh and GDA's mesh should be equal. Got Pjit "
                        f"mesh: {mesh},\n GDA mesh: {x.mesh}")
+    if isinstance(x, Array) and x.sharding.mesh != mesh:
+      raise ValueError("Pjit's mesh and Array's mesh should be equal. Got Pjit "
+                       f"mesh: {mesh},\n Array mesh: {x.sharding.mesh}")
 
 # -------------------- XLA OpSharding to PartitionSpec --------------------
 # Note that OpSharding is more expressive than PartitionSpecs, so it's not
