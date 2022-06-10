@@ -17,8 +17,7 @@ import abc
 import asyncio
 import re
 import threading
-import time
-from typing import Callable
+from typing import Callable, Sequence
 from absl import logging
 
 import jax
@@ -31,7 +30,6 @@ import numpy as np
 import tensorstore as ts
 from etils import epath
 
-
 TS_CONTEXT = ts.Context({'file_io_concurrency': {'limit': 128}})
 _REMOVED_VALUE = 'Value removed'
 _CHECKPOINT_SUCCESS = 'checkpoint_write_success'
@@ -43,19 +41,21 @@ async def create_async_gda_from_callback(
     mesh_axes: gda.MeshAxes,
     data_callback: Callable[[gda.Index], asyncio.Future],
 ):
-  global_idx_rid = gda.get_shard_indices_replica_ids(
-      global_shape, global_mesh, mesh_axes)
+  global_idx_rid = gda.get_shard_indices_replica_ids(global_shape, global_mesh,
+                                                     mesh_axes)
   local_devices = global_mesh.local_devices
-  future_arrays = [data_callback(global_idx_rid[d][0])
-                   for d in local_devices]
+  future_arrays = [data_callback(global_idx_rid[d][0]) for d in local_devices]
   # Pause here and come back to `from_async_callback()` when future_arrays are
   # ready. device_put cannot happen with future_arrays.
   local_arrays = await asyncio.gather(*future_arrays)
 
-  dbs = [jax.device_put(array, device)
-         for array, device in zip(local_arrays, local_devices)]
-  return gda.GlobalDeviceArray(global_shape, global_mesh, mesh_axes, dbs,
-                               gda._GdaFastPathArgs(global_idx_rid, local_devices))
+  dbs = [
+      jax.device_put(array, device)
+      for array, device in zip(local_arrays, local_devices)
+  ]
+  return gda.GlobalDeviceArray(
+      global_shape, global_mesh, mesh_axes, dbs,
+      gda._GdaFastPathArgs(global_idx_rid, local_devices))
 
 
 def _get_metadata(gda):
@@ -70,7 +70,8 @@ def _get_metadata(gda):
           'id': 'gzip'
       },
       'shape': gda.shape,
-      'chunks': np.array(np.maximum(1, gda.local_data(0).shape)),
+      'chunks': np.array(np.maximum(1,
+                                    gda.local_data(0).shape)),
       'dtype': dtype,
   }
 
@@ -92,14 +93,18 @@ def get_tensorstore_spec(ckpt_path: str):
                        f'file path inside the bucket. Got: {ckpt_path}')
     gcs_bucket = m.group(1)
     path_without_bucket = m.group(2)
-    spec['kvstore'] = {'driver': 'gcs', 'bucket': gcs_bucket,
-                       'path': path_without_bucket}
+    spec['kvstore'] = {
+        'driver': 'gcs',
+        'bucket': gcs_bucket,
+        'path': path_without_bucket
+    }
   else:
     spec['kvstore'] = {'driver': 'file', 'path': ckpt_path}
   return spec
 
 
-async def async_serialize(gda_inp: gda.GlobalDeviceArray, tensorstore_spec,
+async def async_serialize(gda_inp: gda.GlobalDeviceArray,
+                          tensorstore_spec,
                           commit_future=None):
   # 'metadata' may not be present at the top level (for example, if we are using
   # a 'cast' driver).
@@ -125,14 +130,19 @@ async def async_serialize(gda_inp: gda.GlobalDeviceArray, tensorstore_spec,
 
 
 def run_serialization(gdas, tensorstore_specs):
+
   async def _run_serializer():
     future_writer = jax.tree_map(async_serialize, gdas, tensorstore_specs)
     return await asyncio.gather(*future_writer)
+
   asyncio.run(_run_serializer())
 
 
-async def async_deserialize(mesh, mesh_axes, tensorstore_spec,
-                            global_shape=None, dtype=None):
+async def async_deserialize(mesh,
+                            mesh_axes,
+                            tensorstore_spec,
+                            global_shape=None,
+                            dtype=None):
   t = ts.open(ts.Spec(tensorstore_spec), open=True, context=TS_CONTEXT).result()
   shape = t.shape if global_shape is None else global_shape
   requires_padding = prod(shape) > prod(t.shape)
@@ -148,7 +158,8 @@ async def async_deserialize(mesh, mesh_axes, tensorstore_spec,
       out = np.zeros(new_shard_shape, dtype=t.dtype.numpy_dtype)
       requested_domain = ts.IndexTransform(input_shape=shape)[index].domain
       restricted_domain = t.domain.intersect(requested_domain)
-      await ts.array(out)[ts.d[:].translate_to[requested_domain.origin]][restricted_domain].write(t[restricted_domain])
+      await ts.array(out)[ts.d[:].translate_to[requested_domain.origin]
+                         ][restricted_domain].write(t[restricted_domain])
     else:
       out = await t[index].read()
 
@@ -161,14 +172,19 @@ async def async_deserialize(mesh, mesh_axes, tensorstore_spec,
   return await create_async_gda_from_callback(tuple(shape), mesh, mesh_axes, cb)
 
 
-def run_deserialization(global_meshes, mesh_axes, tensorstore_specs,
-                        global_shapes=None, dtypes=None):
+def run_deserialization(global_meshes,
+                        mesh_axes,
+                        tensorstore_specs,
+                        global_shapes=None,
+                        dtypes=None):
+
   async def _run_deserializer():
     future_gdas = jax.tree_map(
-        async_deserialize, global_meshes, mesh_axes, tensorstore_specs,
-        [None] * len(tensorstore_specs) if global_shapes is None else global_shapes,
+        async_deserialize, global_meshes, mesh_axes, tensorstore_specs, [None] *
+        len(tensorstore_specs) if global_shapes is None else global_shapes,
         [None] * len(tensorstore_specs) if dtypes is None else dtypes)
     return await asyncio.gather(*future_gdas)
+
   return asyncio.run(_run_deserializer())
 
 
@@ -218,17 +234,6 @@ class GlobalAsyncCheckpointManagerBase(metaclass=abc.ABCMeta):
   """
 
   @abc.abstractmethod
-  def check_for_errors(self):
-    """Checks if any errors have been raised in the child thread.
-
-    This is a non-blocking call that can be called in the main thread.
-    """
-
-  @abc.abstractmethod
-  def wait_until_finished(self):
-    """Blocks until serialization has finished."""
-
-  @abc.abstractmethod
   # TODO(b/233793426): Try removing temp_checkpoint_dir and final_checkpoint_dir
   # from the API and use a callback instead. This will affect how async
   # mechanism works.
@@ -237,13 +242,16 @@ class GlobalAsyncCheckpointManagerBase(metaclass=abc.ABCMeta):
     """Serializes GDAs to TensorStore."""
 
   @abc.abstractmethod
-  def deserialize(self, global_meshes, mesh_axes, tensorstore_specs,
-                  global_shapes=None, dtypes=None):
+  def deserialize(self,
+                  global_meshes,
+                  mesh_axes,
+                  tensorstore_specs,
+                  global_shapes=None,
+                  dtypes=None):
     """Deserializes GDAs from TensorStore."""
 
 
-class GlobalAsyncCheckpointManager(GlobalAsyncCheckpointManagerBase):
-  """Responsible for serializing GDAs via TensorStore."""
+class AsyncWriteManager:
 
   def __init__(self, timeout_secs=300):
     self._timeout_secs = timeout_secs
@@ -252,27 +260,27 @@ class GlobalAsyncCheckpointManager(GlobalAsyncCheckpointManagerBase):
     self._commit_futures = None
     self._thread = None
     self._exception = None
+    self._loop = asyncio.new_event_loop()
 
     if distributed.global_state.client is None:
       raise ValueError('Please initialize the distributed system via '
                        '`jax.distributed.initialize()` at the start of your '
                        'program.')
     self._client = distributed.global_state.client
-    self._final_ckpt_dir = None
+    self._final_checkpoint_dir = None
 
   def __del__(self):
     if self._thread is not None and self._thread.is_alive():
       logging.warning('Please add `.wait_until_finished()` in the main thread '
                       'before your program finishes because there is a '
                       'possibility of losing errors raised if the '
-                      'GlobalAsyncCheckpointManager is deleted before '
-                      'serialization is completed.')
+                      'this class is deleted before writing is completed.')
+    self._loop.close()
 
   def _thread_func(self, temp_checkpoint_dir, final_checkpoint_dir):
     try:
       for future in self._commit_futures:
-        for f in future:
-          f.result()
+        self._loop.run_until_complete(future)
 
       current_process = jax.process_index()
       logging.info('Commit to storage layer has completed by process: %s',
@@ -280,18 +288,24 @@ class GlobalAsyncCheckpointManager(GlobalAsyncCheckpointManagerBase):
 
       # All processes will wait at the barrier. When all processes are at the
       # barrier, the barrier will be satisfied. If not, then it will timeout.
-      self._client.wait_at_barrier(self._final_ckpt_dir, self._timeout_in_ms)
-      logging.info('Finished waiting at barrier for process %s', current_process)
+      self._client.wait_at_barrier(self._final_checkpoint_dir,
+                                   self._timeout_in_ms)
+      logging.info('Finished waiting at barrier for process %s',
+                   current_process)
 
       if current_process == 0:
-        logging.info('Renaming %s to %s', temp_checkpoint_dir, final_checkpoint_dir)
+        logging.info('Renaming %s to %s', temp_checkpoint_dir,
+                     final_checkpoint_dir)
         epath.Path(temp_checkpoint_dir).rename(final_checkpoint_dir)
-        logging.info('Finished saving GDA checkpoint to `%s`.', final_checkpoint_dir)
-        self._client.key_value_set(_get_key(self._final_ckpt_dir), _CHECKPOINT_SUCCESS)
+        logging.info('Finished saving checkpoint to `%s`.',
+                     final_checkpoint_dir)
+        self._client.key_value_set(
+            _get_key(self._final_checkpoint_dir), _CHECKPOINT_SUCCESS)
     except Exception as e:
       self._exception = e
 
   def _start_async_commit(self, temp_checkpoint_dir, final_checkpoint_dir):
+    self._final_checkpoint_dir = final_checkpoint_dir
     self._thread = threading.Thread(
         target=self._thread_func,
         args=(temp_checkpoint_dir, final_checkpoint_dir))
@@ -311,11 +325,19 @@ class GlobalAsyncCheckpointManager(GlobalAsyncCheckpointManagerBase):
 
     self.check_for_errors()
 
-    if self._final_ckpt_dir is not None:
+    if self._final_checkpoint_dir is not None:
       # Block until process 0 writes success value to the key value store.
       # If it fails to write it, then `blocking_key_value_get` will time out.
-      self._client.blocking_key_value_get(_get_key(self._final_ckpt_dir),
-                                          self._timeout_in_ms)
+      self._client.blocking_key_value_get(
+          _get_key(self._final_checkpoint_dir), self._timeout_in_ms)
+
+  def _add_futures(self, futures: Sequence[asyncio.Future]):
+    self._commit_futures = futures
+
+
+class GlobalAsyncCheckpointManager(GlobalAsyncCheckpointManagerBase,
+                                   AsyncWriteManager):
+  """Responsible for serializing GDAs via TensorStore."""
 
   def serialize(self, gdas, tensorstore_specs, *, temp_checkpoint_dir,
                 final_checkpoint_dir):
@@ -341,20 +363,26 @@ class GlobalAsyncCheckpointManager(GlobalAsyncCheckpointManagerBase):
     logging.info('Waiting for previous serialization to finish.')
     self.wait_until_finished()
 
-    self._commit_futures = [[] for _ in range(len(tensorstore_specs))]
+    commit_futures = [[] for _ in range(len(tensorstore_specs))]
 
     async def _run_serializer():
-      future_writer = jax.tree_map(async_serialize, gdas,
-                                   tensorstore_specs, self._commit_futures)
+      future_writer = jax.tree_map(async_serialize, gdas, tensorstore_specs,
+                                   commit_futures)
       return await asyncio.gather(*future_writer)
+
     asyncio.run(_run_serializer())
+
+    self._add_futures(jax.tree_flatten(commit_futures)[0])
 
     # Used in wait_until_finished to check on process != 0, if the checkpoint
     # has finished writing.
-    self._final_ckpt_dir = final_checkpoint_dir
     self._start_async_commit(temp_checkpoint_dir, final_checkpoint_dir)
 
-  def deserialize(self, global_meshes, mesh_axes, tensorstore_specs,
-                  global_shapes=None, dtypes=None):
+  def deserialize(self,
+                  global_meshes,
+                  mesh_axes,
+                  tensorstore_specs,
+                  global_shapes=None,
+                  dtypes=None):
     return run_deserialization(global_meshes, mesh_axes, tensorstore_specs,
                                global_shapes, dtypes)
