@@ -222,9 +222,9 @@ def _numpy_array_constant(x: np.ndarray, canonicalize_types
   x = np.ascontiguousarray(x)
   attr = ir.DenseElementsAttr.get(x, type=element_type, shape=shape)
   if jax._src.lib.xla_extension_version >= 64:
-    return (mhlo.ConstOp(attr).result,)
+    return (mhlo.ConstantOp(attr).result,)
   else:
-    return (mhlo.ConstOp(ir_type, attr).result,)
+    return (mhlo.ConstantOp(ir_type, attr).result,)
 
 
 

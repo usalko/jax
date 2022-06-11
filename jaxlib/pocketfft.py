@@ -162,12 +162,12 @@ def pocketfft_mhlo(a, dtype, *, fft_type: FftType, fft_lengths: List[int]):
 
   if 0 in a_type.shape or 0 in out_shape:
     if xla_client._version >= 64:
-      zero = mhlo.ConstOp(
+      zero = mhlo.ConstantOp(
           ir.DenseElementsAttr.get(np.array(0, dtype=out_dtype), type=out_type))
     else:
-      zero = mhlo.ConstOp(ir.RankedTensorType.get([], out_type),
-                          ir.DenseElementsAttr.get(np.array(0, dtype=out_dtype),
-                                                   type=out_type))
+      zero = mhlo.ConstantOp(
+          ir.RankedTensorType.get([], out_type),
+          ir.DenseElementsAttr.get(np.array(0, dtype=out_dtype), type=out_type))
     if jax._src.lib.mlir_api_version < 9:
       return mhlo.BroadcastOp(
           ir.RankedTensorType.get(out_shape, out_type),
@@ -180,14 +180,14 @@ def pocketfft_mhlo(a, dtype, *, fft_type: FftType, fft_lengths: List[int]):
 
   u8_type = ir.IntegerType.get_unsigned(8)
   if xla_client._version >= 64:
-    descriptor = mhlo.ConstOp(
-        ir.DenseElementsAttr.get(np.frombuffer(descriptor_bytes, dtype=np.uint8),
-                                 type=u8_type))
+    descriptor = mhlo.ConstantOp(
+        ir.DenseElementsAttr.get(
+            np.frombuffer(descriptor_bytes, dtype=np.uint8), type=u8_type))
   else:
-    descriptor = mhlo.ConstOp(
+    descriptor = mhlo.ConstantOp(
         ir.RankedTensorType.get([len(descriptor_bytes)], u8_type),
-        ir.DenseElementsAttr.get(np.frombuffer(descriptor_bytes, dtype=np.uint8),
-                                 type=u8_type))
+        ir.DenseElementsAttr.get(
+            np.frombuffer(descriptor_bytes, dtype=np.uint8), type=u8_type))
   layout = tuple(range(n - 1, -1, -1))
   return custom_call(
       "pocketfft",
