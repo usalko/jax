@@ -1602,7 +1602,10 @@ ad.defjvp_zero(round_p)
 
 def _round_lower(ctx, x, *, rounding_method):
   if rounding_method is RoundingMethod.AWAY_FROM_ZERO:
-    return mhlo.RoundOp(x).results
+    if jax._src.lib.mlir_api_version >= 22:
+      return mhlo.RoundOp(x, mhlo.RoundingModeAttr.get('AFZ')).results
+    else:
+      return mhlo.RoundOp(x).results
   else:
     assert rounding_method is RoundingMethod.TO_NEAREST_EVEN
     round_nearest = mlir.cache_lowering(mlir.lower_fun(_round_to_nearest_even,
