@@ -79,9 +79,9 @@ class Shard:
 class Array:
   # TODO(yashkatariya): Add __slots__ here.
 
-  def __init__(self, shape: Shape, sharding: Sharding,
+  def __init__(self, aval: core.ShapedArray, sharding: Sharding,
                arrays: Sequence[DeviceArray], committed: bool):
-    self._shape = shape
+    self._aval = aval
     self._sharding = sharding
     self._arrays = arrays
     # See https://jax.readthedocs.io/en/latest/faq.html#controlling-data-and-computation-placement-on-devices
@@ -89,12 +89,10 @@ class Array:
     self._committed = committed
     self._npy_value = None
 
-    dtype = arrays[0].dtype
     if config.jax_enable_checks:
-      assert all(db.dtype == dtype for db in arrays), (
+      assert all(db.dtype == self.dtype for db in arrays), (
           "Input arrays to `Array` must have matching dtypes, "
           f"got: {[db.dtype for db in arrays]}")
-    self.dtype = dtype
 
     # Rearrange arrays based on the device assignment.
     if isinstance(sharding, XLACompatibleSharding):
@@ -103,8 +101,16 @@ class Array:
                       for device in self.sharding._addressable_device_assignment()]
 
   @property
+  def aval(self) -> core.ShapedArray:
+    return self._aval
+
+  @property
   def shape(self) -> Shape:
-    return self._shape
+    return self.aval.shape
+
+  @property
+  def dtype(self):
+    return self.aval.dtype
 
   @property
   def ndim(self):
@@ -117,6 +123,25 @@ class Array:
   @property
   def sharding(self):
     return self._sharding
+
+  def __repr__(self):
+    prefix = '{}('.format(self.__class__.__name__.lstrip('_'))
+    if self.aval is not None and self.aval.weak_type:
+      dtype_str = f'dtype={self.dtype.name}, weak_type=True)'
+    else:
+      dtype_str = f'dtype={self.dtype.name})'
+
+    if self.is_fully_addressable():
+      line_width = np.get_printoptions()["linewidth"]
+      s = np.array2string(self._value, prefix=prefix, suffix=',',
+                          separator=', ', max_line_width=line_width)
+      last_line_len = len(s) - s.rfind('\n') + 1
+      sep = ' '
+      if last_line_len + len(dtype_str) + 1 > line_width:
+        sep = ' ' * len(prefix)
+      return f"{prefix}{s},{sep}{dtype_str}"
+    else:
+      return f"{prefix}{self.shape}{dtype_str}"
 
   def is_fully_addressable(self) -> bool:
     # Disable pytype because it does not recognize cached properties.
@@ -134,7 +159,7 @@ class Array:
       device = db.device()
       # Wrap the device arrays in `Array` until C++ returns an Array instead
       # of a DA.
-      array = Array(db.shape, SingleDeviceSharding(device), [db], committed=True)
+      array = Array(db.aval, SingleDeviceSharding(device), [db], committed=True)
       out.append(Shard(device, self.sharding, self.shape, array))
     return out
 
@@ -201,7 +226,8 @@ def make_array_from_callback(shape: Shape, sharding: Sharding,
       device_put(data_callback(sharding.device_indices(device, shape)), device)
       for device in sharding.addressable_devices
   ]
-  return Array(shape, sharding, dbs, committed=True)
+  aval = core.ShapedArray(shape, dbs[0].dtype)
+  return Array(aval, sharding, dbs, committed=True)
 
 
 core.pytype_aval_mappings[Array] = lambda x: core.ShapedArray(x.shape, x.dtype)
@@ -215,6 +241,6 @@ pxla.shard_arg_handlers[Array] = _array_shard_arg
 
 def _array_result_handler(global_aval, out_axis_resources, global_mesh):
   sharding = MeshPspecSharding(global_mesh, out_axis_resources)
-  return lambda bufs: Array(global_aval.shape, sharding, bufs, committed=True)
+  return lambda bufs: Array(global_aval, sharding, bufs, committed=True)
 pxla.global_result_handlers[(core.ShapedArray, pxla.OutputType.Array)] = _array_result_handler
 pxla.global_result_handlers[(core.ConcreteArray, pxla.OutputType.Array)] = _array_result_handler
