@@ -253,6 +253,22 @@ class ShardedJitHloTest(tf_test_util.JaxToTfTestCase):
         ],
         num_partitions=2)
 
+  @jtu.with_mesh([('x', 2)])
+  def test_pjit_TFModuleConstraint(self):
+    """pjit on tf_module member variable will fail if p_spec has List, Dict or Tuple.
+    This test record the software bug b/236392744.
+    """
+    #  test Dict type input data
+    input_data = {'a': {'b': jnp.arange(8)}}
+    p_spec = jax.tree_map(lambda x: None, input_data)
+
+    m = tf.Module()
+    m.input_data = input_data
+    print(r'Only apply magic tf.Module assigment to input_data,' +
+          r'pjit will complain p_spec and input_data mismatch')
+    f = pjit.pjit(lambda x: x, in_axis_resources=(p_spec,), out_axis_resources=None)
+    with self.assertRaises(ValueError):
+      f(m.input_data)
 
 if __name__ == "__main__":
   absltest.main(testLoader=jtu.JaxTestLoader())
