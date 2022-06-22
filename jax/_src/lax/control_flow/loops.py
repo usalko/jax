@@ -1451,7 +1451,7 @@ def _while_lowering(ctx, *args, cond_jaxpr, body_jaxpr, cond_nconsts,
           pred_ctx,
           pred,
           axes=tuple(range(len(pred_aval.shape))))
-    mhlo.ReturnOp([pred])
+    mhlo.ConditionOp(pred, args=[])
 
   # Loop body
   body_block = while_op.regions[1].blocks.append(*flat_loop_carry_types)
