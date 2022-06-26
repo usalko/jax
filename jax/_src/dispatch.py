@@ -94,10 +94,33 @@ def arg_spec(x: Any) -> ArgSpec:
     return aval, None
 
 
+def _arg_spec_for_array(x: Any, device_assignment=None):
+  from jax.experimental.sharding import OpShardingSharding
+
+  aval = xla.abstractify(x)
+  try:
+    return aval, x.sharding
+  except:
+    if device_assignment is not None:
+      return aval, OpShardingSharding.get_replicated(device_assignment)
+    else:
+      return aval, OpShardingSharding.get_replicated(
+          [config.jax_default_device or jax.devices()[0]])
+
+def get_arg_specs_for_array(args):
+  from jax.experimental import pjit
+  da = pjit._get_device_assignment(
+      [a.sharding for a in args if hasattr(a, "sharding")])
+  return unsafe_map(partial(_arg_spec_for_array, device_assignment=da), args)
+
+
 def apply_primitive(prim, *args, **params):
   """Impl rule that compiles and runs a single primitive 'prim' using XLA."""
-  compiled_fun = xla_primitive_callable(prim, *unsafe_map(arg_spec, args),
-                                        **params)
+  if config.jax_array:
+    arg_specs = get_arg_specs_for_array(args)
+  else:
+    arg_specs = unsafe_map(arg_spec, args)
+  compiled_fun = xla_primitive_callable(prim, *arg_specs, **params)
   return compiled_fun(*args)
 
 # TODO(phawkins): update code referring to xla.apply_primitive to point here.
@@ -201,10 +224,13 @@ def _device_from_arg_devices(devices: Sequence[Optional[Device]]) -> Optional[De
 def _xla_call_impl(fun: lu.WrappedFun, *args, device, backend, name,
                    donated_invars, inline, keep_unused: bool):
   del inline  # Only used at tracing time
-  if fun.in_type is None:
-    arg_specs = unsafe_map(arg_spec, args)
+  if config.jax_array:
+    arg_specs = get_arg_specs_for_array(args)
   else:
-    arg_specs = [(None, getattr(x, '_device', None)) for x in args]
+    if fun.in_type is None:
+      arg_specs = unsafe_map(arg_spec, args)
+    else:
+      arg_specs = [(None, getattr(x, '_device', None)) for x in args]
   compiled_fun = xla_callable(fun, device, backend, name, donated_invars,
                               keep_unused, *arg_specs)
   try:
@@ -254,8 +280,22 @@ xla.xla_call_p.def_impl(_xla_call_impl)
 
 def _xla_callable_uncached(fun: lu.WrappedFun, device, backend, name,
                            donated_invars, keep_unused, *arg_specs):
-  return lower_xla_callable(fun, device, backend, name, donated_invars, False,
-                            keep_unused, *arg_specs).compile().unsafe_call
+  if config.jax_array and arg_specs:
+    from jax.interpreters import pxla
+    from jax.experimental import pjit
+
+    in_avals, in_shardings = util.unzip2(arg_specs)
+    # Pass in a singleton `_UNSPECIFIED` for out_shardings because we don't know
+    # the number of output avals at this stage. lower_sharding_computation will
+    # replicate it once it knows the number of out_avals.
+    return pxla.lower_sharding_computation(
+        fun, 'xla_callable', name, in_shardings, pjit._UNSPECIFIED,
+        donated_invars, in_avals,
+        in_is_global=(True,) * len(arg_specs)).compile(
+            _allow_propagation_to_outputs=True).unsafe_call
+  else:
+    return lower_xla_callable(fun, device, backend, name, donated_invars, False,
+                              keep_unused, *arg_specs).compile().unsafe_call
 
 xla_callable = lu.cache(_xla_callable_uncached)
 

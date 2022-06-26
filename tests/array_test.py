@@ -114,7 +114,6 @@ class JaxArrayTest(jtu.JaxTestCase):
       arr = jnp.array([1, 2, 3])
       self.assertIsInstance(arr, array.Array)
       self.assertIsInstance(arr.sharding, sharding.SingleDeviceSharding)
-      self.assertEqual(arr._committed, False)
 
   def test_jnp_array_jit_add(self):
     with jax._src.config.jax_array(True):
@@ -150,6 +149,9 @@ class JaxArrayTest(jtu.JaxTestCase):
       arr_float32 = arr.astype(jnp.float32)
       self.assertEqual(arr_float32.dtype, np.float32)
       self.assertArraysEqual(arr_float32, input_data.astype(np.float32))
+      self.assertLen(arr_float32.addressable_shards, 8)
+      for i in arr_float32.addressable_shards:
+        self.assertArraysEqual(i.data, input_data[i.index].astype(np.float32))
 
   def test_jnp_array_astype(self):
     with jax._src.config.jax_array(True):
@@ -157,6 +159,21 @@ class JaxArrayTest(jtu.JaxTestCase):
       arr_float32 = arr.astype(jnp.float32)
       self.assertEqual(arr_float32.dtype, np.float32)
       self.assertArraysEqual(arr_float32, arr.astype(np.float32))
+
+  @jax._src.config.jax_array(True)
+  def test_sharded_add(self):
+    global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
+    input_shape = (8, 2)
+    a, input_data = create_array(
+        input_shape, sharding.MeshPspecSharding(global_mesh, P('x', 'y')))
+    b, input_data = create_array(
+        input_shape, sharding.MeshPspecSharding(global_mesh, P('x')))
+    out = a + b
+    expected = input_data + input_data
+    self.assertArraysEqual(out, expected)
+    self.assertLen(out.addressable_shards, 8)
+    for i in out.addressable_shards:
+      self.assertArraysEqual(i.data, expected[i.index])
 
 
 class ShardingTest(jtu.JaxTestCase):

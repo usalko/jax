@@ -541,6 +541,7 @@ def _cpp_jit(
     # TODO(sharadmv): Enable fast path for effectful jaxprs
     # TODO(sharadmv): Clean up usage of `execute.args`
     use_fastpath = (
+        not config.jax_array and
         # This is if we have already executed this code-path (most-recent entry
         # has been reset to None). Thus, we do not support the fast-path.
         execute is not None and
@@ -557,7 +558,7 @@ def _cpp_jit(
     ### If we can use the fastpath, we return required info to the caller.
     if use_fastpath:
       (_, xla_executable,
-       _, _, result_handlers, _, _, kept_var_idx) = execute.args
+       _, _, result_handlers, _, _, kept_var_idx) = execute.args  # pytype: disable=attribute-error
       sticky_device = None
       avals = []
       lazy_exprs = [None] * len(result_handlers)
