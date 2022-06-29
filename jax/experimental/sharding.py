@@ -45,6 +45,10 @@ class Sharding(metaclass=abc.ABCMeta):
     process_index = xb.process_index()
     return {d for d in self.device_set if d.process_index == process_index}
 
+  @pxla.maybe_cached_property
+  def is_fully_addressable(self) -> bool:
+    return len(self.device_set) == len(self.addressable_devices)
+
   @abc.abstractmethod
   def device_indices(self, device: Device,
                      global_shape: Shape) -> Optional[Index]:
@@ -168,7 +172,8 @@ class MeshPspecSharding(XLACompatibleSharding):
         self.mesh.shape, self.mesh.axis_names)(num_dimensions, array_mapping)
     # Used in `with_sharding_constraint`.
     special_axes = {}
-    if axis_ctx is not None:
+    # Manual axes is only used with xmap.
+    if axis_ctx is not None and hasattr(axis_ctx, 'manual_axes'):
       axis_names = self.mesh.axis_names
       for manual_axis in axis_ctx.manual_axes:
         special_axes[axis_names.index(manual_axis)] = xc.OpSharding.Type.MANUAL

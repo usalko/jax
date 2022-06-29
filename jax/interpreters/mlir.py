@@ -360,6 +360,22 @@ class ReplicaAxisContext:
   """
   axis_env: xla.AxisEnv
 
+
+@dataclasses.dataclass(frozen=True)
+class ShardingContext:
+  """A hardware axis context for parallel computations that use the sharding
+  interface.
+
+  This context also uses the GSPMD partitioner.
+  """
+  sharding: Any
+
+  # Similar to SPMDContext as ShardingContext also uses the GSPMD partitioner.
+  @property
+  def axis_env(self):
+    return xla.AxisEnv(nreps=1, names=(), sizes=())
+
+
 AxisContext = Union[SPMDAxisContext, ReplicaAxisContext]
 
 @dataclasses.dataclass
