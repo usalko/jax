@@ -505,10 +505,10 @@ class PJitTest(jtu.BufferDonationTestCase):
     jaxpr = jax.make_jaxpr(jax.vmap(h, in_axes=(None, 0)))(x, y).jaxpr
     eqn = jaxpr.eqns[0]
     self.assertIs(eqn.primitive, pjit_p)
-    x_sync, y_sync = (spec.sync for spec in eqn.params['in_axis_resources'])
+    x_sync, y_sync = (s._canonicalized_spec.sync for s in eqn.params['in_shardings'])
     self.assertEqual(x_sync, SpecSync.IN_SYNC)
     self.assertEqual(y_sync, SpecSync.DIM_PERMUTE)
-    x_sync, y_sync, z_sync = (spec.sync for spec in eqn.params['out_axis_resources'])
+    x_sync, y_sync, z_sync = (s._canonicalized_spec.sync for s in eqn.params['out_shardings'])
     self.assertEqual(x_sync, SpecSync.DIM_PERMUTE)
     self.assertEqual(y_sync, SpecSync.IN_SYNC)
     self.assertEqual(z_sync, SpecSync.DIM_PERMUTE)
@@ -532,8 +532,10 @@ class PJitTest(jtu.BufferDonationTestCase):
     jaxpr = jax.make_jaxpr(jax.vmap(f))(x)
     pjit_eqn, = jaxpr.eqns
     constraint_eqn, = pjit_eqn.params['jaxpr'].eqns
-    self.assertEqual(constraint_eqn.params['axis_resources'].partitions, (None, ('x',)))
-    self.assertEqual(constraint_eqn.params['axis_resources'].sync, SpecSync.DIM_PERMUTE)
+    self.assertEqual(constraint_eqn.params['in_sharding']._canonicalized_spec.partitions,
+                     (None, ('x',)))
+    self.assertEqual(constraint_eqn.params['in_sharding']._canonicalized_spec.sync,
+                     SpecSync.DIM_PERMUTE)
 
   @jtu.with_mesh([('x', 2), ('y', 1)])
   def testShardingInXMap(self):
@@ -546,9 +548,9 @@ class PJitTest(jtu.BufferDonationTestCase):
     def _test_rule(*args, **kwargs):
       nonlocal test_rule_called
       test_rule_called = True
-      in_axis_resources = kwargs['in_axis_resources']
-      self.assertEqual(len(in_axis_resources), 1)
-      self.assertIn(('y',), in_axis_resources[0].partitions)
+      in_shardings = kwargs['in_shardings']
+      self.assertEqual(len(in_shardings), 1)
+      self.assertIn(('y',), in_shardings[0]._canonicalized_spec.partitions)
       return rule(*args, **kwargs)
     try:
       mlir._lowerings[pjit_p] = _test_rule
@@ -1060,7 +1062,6 @@ class GDAPjitTest(jtu.JaxTestCase):
         "Got an input GDA to pjit with different partitioning than specified "
         'in the in_axis_resources argument to pjit. The partitioning must match, or '
         'use `jax.experimental.pjit.FROM_GDA` in `in_axis_resources` for GDA. '
-        'Leave in_axis_resources empty for Array. '
         "Got GDA spec: PartitionSpec('x',) and "
         "pjit spec: PartitionSpec('x', 'y') "
         'for GDA: GlobalDeviceArray(shape=(8, 2), dtype=float32)'):
@@ -1424,22 +1425,6 @@ class ArrayPjitTest(jtu.JaxTestCase):
         for s in out4.addressable_shards:
           self.assertArraysEqual(s.data._arrays[0], input_data)
 
-  def test_in_axis_resources_mismatch_error(self):
-    global_input_shape = (8, 2)
-    global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
-    mesh_axes = P('x', 'y')
-
-    input_array, _ = create_array(global_input_shape, global_mesh, mesh_axes)
-
-    with jax._src.config.jax_array(True):
-      with global_mesh:
-        f = pjit(lambda x: x, in_axis_resources=P('x'))
-        with self.assertRaisesRegex(
-            ValueError,
-            ('Got an input Array to pjit with different partitioning '
-             'than specified in the in_axis_resources argument to pjit')):
-          f(input_array)
-
   def test_in_axis_resources_same_as_array_sharding(self):
     global_input_shape = (8, 2)
     global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
@@ -1706,7 +1691,7 @@ class UtilTest(jtu.JaxTestCase):
     dims = 5
     aval = jax.core.ShapedArray((len(devices),) * dims, jnp.float32)
     def roundtrip(spec):
-      op_sharding = pjit_lib.get_aval_sharding_proto(aval, spec, mesh)
+      op_sharding = MeshPspecSharding(mesh, spec)._to_xla_op_sharding(aval.ndim)
       parsed_spec = pjit_lib.parse_flatten_op_sharding(op_sharding, mesh)[0].partitions
       self.assertEqual(parsed_spec[:len(spec)], spec)
       self.assertEqual(parsed_spec[len(spec):], ((),) * (len(parsed_spec) - len(spec)))
