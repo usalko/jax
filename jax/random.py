@@ -113,7 +113,7 @@ Here is a short summary:
    always correct w/ remat              ✅                 ✅
    identical across CPU/GPU/TPU         ✅                 ✅
    identical across JAX/XLA versions    ✅
-   identical across shardings           ✅
+   identical across shardings           ✅                 ✅   ✅
    =================================   =================  ===  ==========
 
 """
