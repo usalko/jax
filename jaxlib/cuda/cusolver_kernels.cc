@@ -836,4 +836,108 @@ void Gesvdj(cudaStream_t stream, void** buffers, const char* opaque,
   }
 }
 
+// Singular value decomposition using qdwh-based polar decomposition: gesvdp
+
+static absl::Status Gesvdp_(cudaStream_t stream, void** buffers,
+                            const char* opaque, size_t opaque_len) {
+  auto s = UnpackDescriptor<GesvdpDescriptor>(opaque, opaque_len);
+  JAX_RETURN_IF_ERROR(s.status());
+  const GesvdpDescriptor& d = **s;
+  auto h = SolverHandlePool::Borrow(stream);
+  JAX_RETURN_IF_ERROR(h.status());
+  auto& handle = *h;
+  JAX_RETURN_IF_ERROR(JAX_AS_STATUS(cudaMemcpyAsync(
+      buffers[1], buffers[0],
+      SizeOfCusolverType(d.type) * static_cast<std::int64_t>(d.batch) *
+          static_cast<std::int64_t>(d.m) * static_cast<std::int64_t>(d.n),
+      cudaMemcpyDeviceToDevice, stream)));
+  int* info = static_cast<int*>(buffers[5]);
+  void* work = buffers[6];
+  int k = std::min(d.m, d.n);
+  int num_u_cols = d.econ ? k: d.m;
+  int num_v_cols = d.econ ? k: d.n;
+  switch (d.type) {
+    case CusolverType::F32: {
+      float* a = static_cast<float*>(buffers[1]);
+      float* s = static_cast<float*>(buffers[2]);
+      float* u = static_cast<float*>(buffers[3]);
+      float* v = static_cast<float*>(buffers[4]);
+      for (int i = 0; i < d.batch; ++i) {
+        JAX_RETURN_IF_ERROR(JAX_AS_STATUS(cusolverDnSgesvdp(
+            handle.get(), d.jobz, d.econ, d.m, d.n, a, d.m, s, u, d.m, v, d.n,
+            static_cast<float*>(work), d.lwork,
+            /*rwork=*/nullptr, info)));
+        a += d.m * d.n;
+        s += k;
+        u += d.m * num_u_cols;
+        v += d.n * num_v_cols;
+        ++info;
+      }
+      break;
+    }
+    case CusolverType::F64: {
+      double* a = static_cast<double*>(buffers[1]);
+      double* s = static_cast<double*>(buffers[2]);
+      double* u = static_cast<double*>(buffers[3]);
+      double* v = static_cast<double*>(buffers[4]);
+      for (int i = 0; i < d.batch; ++i) {
+        JAX_RETURN_IF_ERROR(JAX_AS_STATUS(cusolverDnDgesvdp(
+            handle.get(), d.jobz, d.econ, d.m, d.n, a, d.m, s, u, d.m, v, d.n,
+            static_cast<double*>(work), d.lwork,
+            /*rwork=*/nullptr, info)));
+        a += d.m * d.n;
+        s += k;
+        u += d.m * num_u_cols;
+        v += d.n * num_v_cols;
+        ++info;
+      }
+      break;
+    }
+    case CusolverType::C64: {
+      cuComplex* a = static_cast<cuComplex*>(buffers[1]);
+      float* s = static_cast<float*>(buffers[2]);
+      cuComplex* u = static_cast<cuComplex*>(buffers[3]);
+      cuComplex* v = static_cast<cuComplex*>(buffers[4]);
+      for (int i = 0; i < d.batch; ++i) {
+        JAX_RETURN_IF_ERROR(JAX_AS_STATUS(cusolverDnCgesvdp(
+            handle.get(), d.jobz, d.econ, d.m, d.n, a, d.m, s, u, d.m, v, d.n,
+            static_cast<cuComplex*>(work), d.lwork, /*rwork=*/nullptr, info)));
+        a += d.m * d.n;
+        s += k;
+        u += d.m * num_u_cols;
+        v += d.n * num_v_cols;
+        ++info;
+      }
+      break;
+    }
+    case CusolverType::C128: {
+      cuDoubleComplex* a = static_cast<cuDoubleComplex*>(buffers[1]);
+      double* s = static_cast<double*>(buffers[2]);
+      cuDoubleComplex* u = static_cast<cuDoubleComplex*>(buffers[3]);
+      cuDoubleComplex* v = static_cast<cuDoubleComplex*>(buffers[4]);
+      for (int i = 0; i < d.batch; ++i) {
+        JAX_RETURN_IF_ERROR(JAX_AS_STATUS(cusolverDnZgesvdp(
+            handle.get(), d.jobz, d.econ, d.m, d.n, a, d.m, s, u, d.m, v, d.n,
+            static_cast<cuDoubleComplex*>(work), d.lwork,
+            /*rwork=*/nullptr, info)));
+        a += d.m * d.n;
+        s += k;
+        u += d.m * num_u_cols;
+        v += d.n * num_v_cols;
+        ++info;
+      }
+      break;
+    }
+  }
+  return absl::OkStatus();
+}
+void Gesvdp(cudaStream_t stream, void** buffers, const char* opaque,
+            size_t opaque_len, XlaCustomCallStatus* status) {
+  auto s = Gesvdp_(stream, buffers, opaque, opaque_len);
+  if (!s.ok()) {
+    XlaCustomCallStatusSetFailure(status, std::string(s.message()).c_str(),
+                                  s.message().length());
+  }
+}
+
 }  // namespace jax

@@ -130,6 +130,18 @@ struct GesvdjDescriptor {
 void Gesvdj(cudaStream_t stream, void** buffers, const char* opaque,
             size_t opaque_len, XlaCustomCallStatus* status);
 
+// Singular value decomposition using qdwh-based polar decomposition: gesvdp
+struct GesvdpDescriptor {
+  CusolverType type;
+  int batch, m, n;
+  int lwork;
+  cusolverEigMode_t jobz;
+  int econ;
+};
+
+void Gesvdp(cudaStream_t stream, void** buffers, const char* opaque,
+            size_t opaque_len, XlaCustomCallStatus* status);
+
 }  // namespace jax
 
 #endif  // JAXLIB_CUSOLVER_KERNELS_H_

@@ -24,6 +24,7 @@ limitations under the License.
 #include "third_party/gpus/cuda/include/cuda.h"
 #include "third_party/gpus/cuda/include/cuda_runtime_api.h"
 #include "third_party/gpus/cuda/include/cusolverDn.h"
+#include "third_party/gpus/cuda/includes/cuda_headers/third_party/gpus/cuda/include/cusolver_common.h"
 #include "jaxlib/cuda/cuda_gpu_kernel_helpers.h"
 #include "jaxlib/cuda/cusolver_kernels.h"
 #include "jaxlib/kernel_pybind11_helpers.h"
@@ -458,6 +459,46 @@ std::pair<int, py::bytes> BuildGesvdjDescriptor(const py::dtype& dtype,
                      GesvdjDescriptor{type, batch, m, n, lwork, jobz, econ})};
 }
 
+// Singular value decomposition using qdwh-based polar decomposition: gesvdp
+
+// Returns the workspace size and a descriptor for a gesvdp operation.
+std::pair<int, py::bytes> BuildGesvdpDescriptor(const py::dtype& dtype,
+                                                int batch, int m, int n,
+                                                bool compute_uv, int econ) {
+  CusolverType type = DtypeToCusolverType(dtype);
+  auto h = SolverHandlePool::Borrow();
+  JAX_THROW_IF_ERROR(h.status());
+  auto& handle = *h;
+  int lwork;
+  cusolverEigMode_t jobz =
+      compute_uv ? CUSOLVER_EIG_MODE_VECTOR : CUSOLVER_EIG_MODE_NOVECTOR;
+  switch (type) {
+    case CusolverType::F32:
+      JAX_THROW_IF_ERROR(JAX_AS_STATUS(
+          cusolverDnSgesvdp_bufferSize(
+            handle.get(), jobz, econ, m, n, &lwork)));
+      break;
+    case CusolverType::F64:
+      JAX_THROW_IF_ERROR(JAX_AS_STATUS(
+          cusolverDnDgesvdp_bufferSize(
+            handle.get(), jobz, econ, m, n, &lwork)));
+      break;
+    case CusolverType::C64:
+      JAX_THROW_IF_ERROR(JAX_AS_STATUS(
+          cusolverDnCgesvdp_bufferSize(
+            handle.get(), jobz, econ, m, n, &lwork)));
+      break;
+    case CusolverType::C128:
+      JAX_THROW_IF_ERROR(JAX_AS_STATUS(
+          cusolverDnZgesvdp_bufferSize(
+            handle.get(), jobz, econ, m, n, &lwork)));
+      break;
+  }
+
+  return {lwork, PackDescriptor(
+                    GesvdpDescriptor{type, batch, m, n, lwork, jobz, econ})};
+}
+
 py::dict Registrations() {
   py::dict dict;
   dict["cusolver_potrf"] = EncapsulateFunction(Potrf);
@@ -468,6 +509,7 @@ py::dict Registrations() {
   dict["cusolver_syevj"] = EncapsulateFunction(Syevj);
   dict["cusolver_gesvd"] = EncapsulateFunction(Gesvd);
   dict["cusolver_gesvdj"] = EncapsulateFunction(Gesvdj);
+  dict["cusolver_gesvdp"] = EncapsulateFunction(Gesvdp);
   return dict;
 }
 
@@ -481,6 +523,7 @@ PYBIND11_MODULE(_cusolver, m) {
   m.def("build_syevj_descriptor", &BuildSyevjDescriptor);
   m.def("build_gesvd_descriptor", &BuildGesvdDescriptor);
   m.def("build_gesvdj_descriptor", &BuildGesvdjDescriptor);
+  m.def("build_gesvdp_descriptor", &BuildGesvdpDescriptor);
 }
 
 }  // namespace
