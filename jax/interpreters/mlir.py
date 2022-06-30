@@ -24,8 +24,8 @@ import io
 import itertools
 import re
 import typing
-from typing import (Any, Callable, Dict, List, Optional, Sequence, Set, Tuple,
-                    Type, Union, FrozenSet)
+from typing import (Any, Callable, Dict, Iterator, List, Optional, Sequence,
+                    Set, Tuple, Type, Union, FrozenSet)
 from typing_extensions import Protocol
 import warnings
 
@@ -370,6 +370,8 @@ class ModuleContext:
   axis_context: AxisContext
   name_stack: NameStack
   keepalives: List[Any]
+  channel_iterator: Iterator[int]
+  host_callbacks: List[Any]
 
   # Cached primitive lowerings.
   cached_primitive_lowerings: Dict[Any, func_dialect.FuncOp]
@@ -384,11 +386,14 @@ class ModuleContext:
       axis_context: AxisContext,
       name_stack: NameStack,
       keepalives: List[Any],
+      channel_iterator: Iterator[int],
+      host_callbacks: List[Any],
       context: Optional[ir.Context] = None,
       module: Optional[ir.Module] = None,
       ip: Optional[ir.InsertionPoint] = None,
       symbol_table: Optional[ir.SymbolTable] = None,
-      cached_primitive_lowerings: Optional[Dict[Any, func_dialect.FuncOp]] = None):
+      cached_primitive_lowerings: Optional[Dict[Any,
+                                                func_dialect.FuncOp]] = None):
     assert platform is not None
     self.context = context or make_ir_context()
     self.module = module or ir.Module.create(loc=ir.Location.unknown(self.context))
@@ -399,7 +404,15 @@ class ModuleContext:
     self.name_stack = name_stack
     self.cached_primitive_lowerings = ({} if cached_primitive_lowerings is None
                                        else cached_primitive_lowerings)
+    self.channel_iterator = channel_iterator
     self.keepalives = keepalives
+    self.host_callbacks = host_callbacks
+
+  def new_channel(self) -> int:
+    return next(self.channel_iterator)
+
+  def add_host_callback(self, host_callback: Any) -> None:
+    self.host_callbacks.append(host_callback)
 
   def add_keepalive(self, keepalive: Any) -> None:
     self.keepalives.append(keepalive)
@@ -491,16 +504,18 @@ def sharded_aval(aval: core.ShapedArray,
 
 
 def lower_jaxpr_to_module(
-    module_name: str, jaxpr: core.ClosedJaxpr,
+    module_name: str,
+    jaxpr: core.ClosedJaxpr,
     unordered_effects: List[core.Effect],
     ordered_effects: List[core.Effect],
     platform: str,
     axis_context: AxisContext,
-    name_stack: NameStack, donated_args: Sequence[bool],
+    name_stack: NameStack,
+    donated_args: Sequence[bool],
     replicated_args: Optional[Sequence[bool]] = None,
     arg_shardings: Optional[Sequence[Optional[xc.OpSharding]]] = None,
     result_shardings: Optional[Sequence[Optional[xc.OpSharding]]] = None
-    ) -> Tuple[ir.Module, Optional[Any]]:
+) -> Tuple[ir.Module, Optional[Any], List[Any]]:
   """Lowers a top-level jaxpr to an MHLO module.
 
   Handles the quirks of the argument/return value passing conventions of the
@@ -537,9 +552,13 @@ def lower_jaxpr_to_module(
       msg = f"Donation is not implemented for {platform}.\n{msg}"
     warnings.warn(f"Some donated buffers were not usable: {', '.join(unused_donations)}.\n{msg}")
 
+  # MHLO channels need to start at 1
+  channel_iter = itertools.count(1)
   # Create a keepalives list that will be mutated during the lowering.
   keepalives: List[Any] = []
-  ctx = ModuleContext(platform, axis_context, name_stack, keepalives)
+  host_callbacks: List[Any] = []
+  ctx = ModuleContext(platform, axis_context, name_stack, keepalives,
+                      channel_iter, host_callbacks)
   with ctx.context, ir.Location.unknown(ctx.context):
     # Remove module name characters that XLA would alter. This ensures that
     # XLA computation preserves the module name.
@@ -562,7 +581,7 @@ def lower_jaxpr_to_module(
         input_output_aliases=input_output_aliases)
 
   ctx.module.operation.verify()
-  return ctx.module, ctx.keepalives
+  return ctx.module, ctx.keepalives, ctx.host_callbacks
 
 def module_to_string(module: ir.Module) -> str:
   output = io.StringIO()
@@ -597,7 +616,7 @@ Token = Sequence[ir.Value]
 def token_type() -> Sequence[ir.Type]:
   return [mhlo.TokenType.get()]
 
-def token() -> Token:
+def create_token() -> Token:
   return wrap_singleton_ir_values(
       mhlo.CreateTokenOp(mhlo.TokenType.get()).result)
 
@@ -622,7 +641,7 @@ class TokenSet:
   @classmethod
   def create(cls, effects: Sequence[core.Effect]) -> TokenSet:
     """Creates a `TokenSet` corresponding to a list of `core.Effect`s."""
-    tokens = [token() for _ in effects]
+    tokens = [create_token() for _ in effects]
     return TokenSet(zip(effects, tokens))
 
   def items(self) -> Sequence[Tuple[core.Effect, Token]]:
@@ -1248,30 +1267,134 @@ def xla_fallback_lowering(prim: core.Primitive):
 
 register_lowering(ad.custom_lin_p, ad._raise_custom_vjp_error_on_jvp)
 
-def emit_python_callback(platform, callback,
-                         operands: List[ir.Value],
-                         operand_avals: List[core.AbstractValue],
-                         result_avals: List[core.AbstractValue],
-                         has_side_effect: bool) -> Tuple[List[ir.Value], Any]:
+
+def send_to_host(channel: int, token: mhlo.TokenType, operand: Any,
+                 aval: core.ShapedArray, name: str) -> ir.Value:
+  channel_handle = mhlo.ChannelHandle.get(channel, 2)
+  send_op = mhlo.SendOp(mhlo.TokenType.get(), [operand], token, channel_handle,
+                        is_host_transfer=ir.BoolAttr.get(True))
+  # Need to construct the XLA string for the type
+  if aval.dtype == np.float32:
+    dtype_str = "f32"
+  elif aval.dtype == np.int32:
+    dtype_str = "s32"
+  elif aval.dtype == np.uint32:
+    dtype_str = "u32"
+  else:
+    raise NotImplementedError(aval)
+
+  send_op.attributes["mhlo.frontend_attributes"] = ir.DictAttr.get(
+      dict(
+          _xla_host_transfer_handler_name=ir.StringAttr.get(str(name)),
+          _xla_host_transfer_original_type=ir.StringAttr.get(dtype_str),
+          _xla_host_transfer_rendezvous=ir.StringAttr.get(str(name))))
+  return send_op.result
+
+
+def receive_from_host(channel: int, token: mhlo.TokenType,
+                      out_aval: core.ShapedArray, name: str) -> ir.Value:
+  channel_handle = mhlo.ChannelHandle.get(channel, 3)
+  recv_op = mhlo.RecvOp([aval_to_ir_type(out_aval),
+                         mhlo.TokenType.get()], token, channel_handle,
+                         is_host_transfer=ir.BoolAttr.get(True))
+  # Need to construct the XLA string for the type
+  if out_aval.dtype == np.float32:
+    dtype_str = "f32"
+  elif out_aval.dtype == np.int32:
+    dtype_str = "s32"
+  elif out_aval.dtype == np.uint32:
+    dtype_str = "u32"
+  else:
+    raise NotImplementedError(out_aval)
+
+  recv_op.attributes["mhlo.frontend_attributes"] = ir.DictAttr.get(
+      dict(
+          _xla_host_transfer_handler_name=ir.StringAttr.get(str(name)),
+          _xla_host_transfer_original_type=ir.StringAttr.get(dtype_str),
+          _xla_host_transfer_rendezvous=ir.StringAttr.get(str(name))))
+  # Token should be at the end of the results
+  result, token = recv_op.results
+  return token, result
+
+
+def emit_python_callback(
+    ctx: LoweringRuleContext, callback, token: Optional[Any],
+    operands: List[ir.Value], operand_avals: List[core.AbstractValue],
+    result_avals: List[core.AbstractValue],
+    has_side_effect: bool) -> Tuple[List[ir.Value], Any, Any]:
   """Creates an MHLO `CustomCallOp` that calls back to the provided function."""
+  platform = ctx.module_context.platform
   if platform in {"cuda", "rocm"} and jax._src.lib.version < (0, 3, 11):
     raise ValueError(
         "`EmitPythonCallback` on CUDA only supported on jaxlib >= 0.3.11")
-  if platform not in {"cpu", "cuda", "rocm"}:
+  if platform in {"tpu"} and jax._src.lib.version < (0, 3, 15):
     raise ValueError(
-        "`EmitPythonCallback` only supported on CPU, CUDA, and ROCM backends.")
+        "`EmitPythonCallback` on TPU only supported on jaxlib >= 0.3.15")
+  if platform not in {"cpu", "cuda", "rocm", "tpu"}:
+    raise ValueError(
+        f"`EmitPythonCallback` not supported on {platform} backend.")
   backend = xb.get_backend(platform)
   result_shapes = util.flatten(
       [xla.aval_to_xla_shapes(result_aval) for result_aval in result_avals])
   operand_shapes = util.flatten(
       [xla.aval_to_xla_shapes(op_aval) for op_aval in operand_avals])
-  callback_descriptor, keepalive = backend.get_emit_python_callback_descriptor(
-      callback, operand_shapes, result_shapes)
+  if platform == "tpu":
+    if result_avals:
+      raise NotImplementedError(
+          "Callback with return values not supported on TPU.")
+    token = token or mhlo.CreateTokenOp(mhlo.TokenType.get()).result
+    send_channels = []
+    for operand, operand_aval in zip(operands, operand_avals):
+      channel = ctx.module_context.new_channel()
+      token = send_to_host(channel, token, operand, operand_aval,
+                           callback.__name__)
+      send_channels.append(channel)
+    recv_channels = []
+    recv_channel = ctx.module_context.new_channel()
+
+    # `send-to-host`s can be interleaved by the transfer manager so we add in a
+    # dummy recv to sequence them (the recv can only happen after all the sends
+    # are done). We'd like to send back a 0-shaped array to avoid unnecessary
+    # copies but that currently doesn't work with the transfer
+    # manager as well.
+    # TODO(sharadmv,chky): enable sending back a 0-dim array
+    # TODO(sharadmv,chky): avoid interleaving sends in the transfer manager
+    def _wrapped_callback(*args, **kwargs):
+      callback(*args, **kwargs)
+      return (np.zeros(1, np.float32),)
+
+    dummy_recv_aval = core.ShapedArray((1,), np.float32)
+    result_shapes = [*result_shapes, xla.aval_to_xla_shapes(dummy_recv_aval)[0]]
+    token, _ = receive_from_host(recv_channel, token, dummy_recv_aval,
+                                 callback.__name__)
+    recv_channels.append(recv_channel)
+    opaque = backend.make_python_callback_from_host_send_and_recv(
+        _wrapped_callback, operand_shapes, result_shapes, send_channels,
+        recv_channels)
+    ctx.module_context.add_host_callback(opaque)
+    return [], token, opaque
+  result_types = util.flatten([aval_to_ir_types(aval) for aval in result_avals])
+  wrapped_callback = callback
+  if token:
+
+    def wrapped_callback(token, *args):
+      return token, *callback(*args)
+
+    operand_shapes = [
+        xla.aval_to_xla_shapes(core.abstract_token)[0], *operand_shapes
+    ]
+    result_shapes = [
+        xla.aval_to_xla_shapes(core.abstract_token)[0], *result_shapes
+    ]
+    operands = [token, *operands]
+    result_types = [token_type()[0], *result_types]
+  callback_descriptor, keepalive = (
+      backend.get_emit_python_callback_descriptor(wrapped_callback,
+                                                  operand_shapes,
+                                                  result_shapes))
   descriptor_operand = ir_constant(
       callback_descriptor, canonicalize_types=False)
   callback_operands = [descriptor_operand, *operands]
-  result_types = util.flatten(
-      [aval_to_ir_types(aval) for aval in result_avals])
   result_type = ir.TupleType.get_tuple(result_types)
   call_target_name = ("xla_python_gpu_callback"
                      if platform in {"cuda", "rocm"} else "xla_python_cpu_callback")
@@ -1289,7 +1412,9 @@ def emit_python_callback(platform, callback,
       mhlo.GetTupleElementOp(result, i32_attr(i)).result
       for i in range(len(result_types))
   ]
-  return results, keepalive
+  if token:
+    token, *results = results
+  return results, token, keepalive
 
 # Lax ops missing MLIR lowerings.
 # # TODO(b/203775215): these are missing from the cHLO dialect. Either add

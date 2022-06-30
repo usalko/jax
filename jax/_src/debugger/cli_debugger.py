@@ -83,7 +83,7 @@ class DebuggerFrame:
 debug_lock = threading.Lock()
 
 
-def breakpoint(*, ordered: bool = False, **kwargs):  # pylint: disable=redefined-builtin
+def breakpoint(*, ordered: bool = True, **kwargs):  # pylint: disable=redefined-builtin
   """Enters a breakpoint at a point in a program."""
   frame_infos = inspect.stack()
   # Filter out internal frames

@@ -891,7 +891,7 @@ def xla_computation(fun: Callable,
                            if eff not in core.ordered_effects]
       ordered_effects = [eff for eff in jaxpr.effects
                          if eff in core.ordered_effects]
-      m, _ = mlir.lower_jaxpr_to_module(
+      m, _, _ = mlir.lower_jaxpr_to_module(
           f"xla_computation_{fun_name}",
           core.ClosedJaxpr(jaxpr, consts),
           unordered_effects=unordered_effects,
