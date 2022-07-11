@@ -13,7 +13,9 @@
 # limitations under the License.
 """Tests for JAX2TF converted.
 
-Specific JAX primitive conversion tests are in primitives_test."""
+Specific JAX primitive conversion tests are in primitives_test.
+"""
+import tensorflow as tf  # Keep this, see b/239052279.
 
 import unittest
 from typing import Callable, Dict, Optional, Tuple

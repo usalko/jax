@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Tests for the jax2tf conversion of pjit."""
-
+import tensorflow as tf  # Keep this, see b/239052279.
 import functools
 import logging
 import os
@@ -34,8 +34,6 @@ import jax.numpy as jnp
 from jax._src.lib import xla_bridge
 
 import numpy as np
-
-import tensorflow as tf  # type: ignore[import]
 
 config.parse_flags_with_absl()
 

@@ -12,14 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Tests for the shape-polymorphic jax2tf conversion."""
-
+import tensorflow as tf  # Keep this, see b/239052279.
 from absl.testing import absltest, parameterized
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import collections
 import functools
 from functools import partial
-import logging
 import operator
 import re
 
@@ -37,8 +36,6 @@ from jax._src import util
 import numpy as np
 
 from jax.experimental.jax2tf.tests import tf_test_util
-
-import tensorflow as tf  # type: ignore[import]
 
 from jax.config import config
 

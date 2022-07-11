@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Tests for call_tf."""
+import tensorflow as tf  # Keep this, see b/239052279.
 from functools import partial
 from typing import Callable, Dict, Tuple
 import unittest

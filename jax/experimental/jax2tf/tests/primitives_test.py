@@ -48,9 +48,8 @@ objects for the harness.
 See `jax2tf_limitations.limitations_for_harness`. If a group name does
 not need limitations, then it must be listed in the
 `jax2tf_limitations.harness_groups_no_limitations`.
-
 """
-
+import tensorflow as tf  # Keep this, see b/239052279.
 import datetime
 import os
 from typing import Any, Dict, Tuple
@@ -70,7 +69,6 @@ from jax.interpreters import mlir
 from jax.interpreters import xla
 
 import numpy as np
-import tensorflow as tf  # type: ignore[import]
 
 config.parse_flags_with_absl()
 
