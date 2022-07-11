@@ -17,6 +17,7 @@ import functools
 from collections import Counter
 from typing import Sequence, Tuple, Optional, Mapping, Dict, Set, Union
 
+from jax._src.config import config
 from jax._src.util import safe_zip
 from jax._src.lib import xla_bridge as xb
 from jax._src.lib import xla_client as xc
@@ -72,6 +73,10 @@ class XLACompatibleSharding(Sharding):
     raise NotImplementedError('Subclasses should implement this method.')
 
   @abc.abstractmethod
+  def is_compatible_aval(self, aval_shape: Shape):
+    raise NotImplementedError('Subclasses should implement this method.')
+
+  @abc.abstractmethod
   def device_replica_id_map(self, global_shape: Shape) -> Mapping[Device, int]:
     raise NotImplementedError('Subclasses should implement this method.')
 
@@ -107,6 +112,14 @@ class MeshPspecSharding(XLACompatibleSharding):
     else:
       self._parsed_pspec = _parsed_pspec
 
+    if config.jax_enable_checks:
+      try:
+        [self.mesh.shape[r] for p in self._parsed_pspec if p is not None
+         for r in p]
+      except KeyError as e:
+        raise ValueError(f"Resource axis: {e.args[0]} of {self.spec} is undefined. "
+                         "Did you forget to declare the mesh?") from None
+
   def __repr__(self):
     return f'MeshPspecSharding(mesh={dict(self.mesh.shape)}, partition_spec={self.spec})'
 
@@ -122,6 +135,12 @@ class MeshPspecSharding(XLACompatibleSharding):
     if id(self.mesh) == id(other.mesh) and self._parsed_pspec == other._parsed_pspec:
       return True
     return self.mesh == other.mesh and self._parsed_pspec == other._parsed_pspec
+
+  def is_compatible_aval(self, aval_shape: Shape):
+    if len(aval_shape) < len(self._parsed_pspec):
+      raise ValueError(
+          f"Sharding {self} has a rank of at least {len(self._parsed_pspec)}, "
+          f"but the aval rank is {len(aval_shape)}")
 
   def normalize(self):
     from jax.experimental import pjit
@@ -206,6 +225,9 @@ class SingleDeviceSharding(XLACompatibleSharding):
       return False
     return self._device == other._device
 
+  def is_compatible_aval(self, aval_shape: Shape):
+    pass
+
   def normalize(self):
     return SingleDeviceSharding(self._device)
 
@@ -241,6 +263,9 @@ class PmapSharding(XLACompatibleSharding):
     self.devices = devices
     # The sharding spec should be pmap's sharding spec.
     self.sharding_spec = sharding_spec
+
+  def is_compatible_aval(self, aval_shape: Shape):
+    pass
 
   def normalize(self):
     return PmapSharding(self.devices, self.sharding_spec)
