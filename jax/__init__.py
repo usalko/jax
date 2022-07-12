@@ -101,6 +101,7 @@ from jax._src.api import (
   process_count as process_count,
   process_index as process_index,
   pxla,  # TODO(phawkins): update users to avoid this.
+  release_backend_clients as release_backend_clients,
   remat as remat,
   shapecheck as shapecheck,
   ShapedArray as ShapedArray,

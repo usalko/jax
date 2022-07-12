@@ -3337,3 +3337,13 @@ def block_until_ready(x):
     except AttributeError:
       return x
   return jax.tree_util.tree_map(try_to_block, x)
+
+
+def release_backend_clients():
+  """
+  Releasing all backend clients so that new backend clients can be created later.
+  """
+  xb._clear_backends()
+  dispatch.xla_callable.cache_clear()
+  dispatch.xla_primitive_callable.cache_clear()
+  _cpp_jit_cache.clear()
