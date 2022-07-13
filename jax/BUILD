@@ -27,7 +27,6 @@ load(
     "py_library_providing_imports_info",
     "pytype_library",
     "scipy_py_deps",
-    "sharded_jit_visibility",
 )
 
 licenses(["notice"])
@@ -98,7 +97,6 @@ py_library_providing_imports_info(
             "_src/test_util.py",
             "*_test.py",
             "**/*_test.py",
-            "interpreters/sharded_jit.py",
         ],
     ) + [
         # until new parallelism APIs are moved out of experimental
@@ -140,7 +138,6 @@ py_library_providing_imports_info(
     visibility = ["//visibility:public"],
     deps = [
         ":jax",
-        ":sharded_jit",
     ] + absl_logging_py_deps + numpy_py_deps,
 )
 
@@ -160,16 +157,6 @@ pytype_library(
         "experimental/sparse/*.py",
     ]),
     visibility = ["//visibility:public"],
-    deps = [":jax"],
-)
-
-# sharded_jit is deprecated. Please do not add any more projects to the visibility.
-pytype_library(
-    name = "sharded_jit",
-    srcs = ["interpreters/sharded_jit.py"],
-    visibility = [
-        ":internal",
-    ] + sharded_jit_visibility,
     deps = [":jax"],
 )
 
