@@ -114,6 +114,7 @@ py_library_providing_imports_info(
         "experimental/compilation_cache/compilation_cache.py",
         "experimental/compilation_cache/gfile_cache.py",
         "experimental/compilation_cache/cache_interface.py",
+        "experimental/release_backend_clients.py",
     ],
     lib_rule = pytype_library,
     visibility = ["//visibility:public"],
@@ -258,4 +259,13 @@ pytype_library(
         ":experimental",
         ":jax",
     ],
+)
+
+pytype_library(
+    name = "release_backend_clients",
+    srcs = [
+        "experimental/release_backend_clients.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [":jax"],
 )

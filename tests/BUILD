@@ -880,6 +880,14 @@ jax_test(
     ],
 )
 
+jax_test(
+    name = "release_backend_clients_test",
+    srcs = ["release_backend_clients_test.py"],
+    deps = [
+        "//jax:release_backend_clients",
+    ],
+)
+
 exports_files(
     [
         "api_test.py",
