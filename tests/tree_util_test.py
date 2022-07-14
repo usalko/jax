@@ -140,11 +140,11 @@ TREE_STRINGS = (
     "PyTreeDef((*, *))",
     "PyTreeDef(((*, *), [*, (*, None, *)]))",
     "PyTreeDef([*])",
-    ("PyTreeDef([*, CustomNode(namedtuple[<class '__main__.ATuple'>], [(*, "
-     "CustomNode(namedtuple[<class '__main__.ATuple'>], [*, None])), {'baz': "
+    ("PyTreeDef([*, CustomNode(namedtuple[ATuple], [(*, "
+     "CustomNode(namedtuple[ATuple], [*, None])), {'baz': "
      "*}])])"),
-    "PyTreeDef([CustomNode(<class '__main__.AnObject'>[[4, 'foo']], [*, None])])",
-    "PyTreeDef(CustomNode(<class '__main__.Special'>[None], [*, *]))",
+    "PyTreeDef([CustomNode(AnObject[[4, 'foo']], [*, None])])",
+    "PyTreeDef(CustomNode(Special[None], [*, *]))",
     "PyTreeDef({'a': *, 'b': *})",
 )
 
