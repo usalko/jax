@@ -21,7 +21,7 @@ from jax import core
 from jax._src import api_util
 from jax._src import dispatch
 from jax._src.config import config
-from jax._src.util import prod
+from jax._src.util import prod, safe_zip
 from jax._src.lib import xla_client as xc
 from jax._src.api import device_put
 from jax.interpreters import pxla, xla
@@ -262,11 +262,18 @@ dispatch.device_put_handlers[Array] = _device_put_array
 
 
 def _array_shard_arg(x, devices, indices):
-  return x._arrays
+  return [buf if buf.device() == d else buf.copy_to_device(d)
+          for buf, d in safe_zip(x._arrays, devices)]
 pxla.shard_arg_handlers[Array] = _array_shard_arg
 
 
-def _array_result_handler(global_aval, out_sharding):
+def _array_global_result_handler(global_aval, out_sharding):
   return lambda bufs: Array(global_aval.shape, out_sharding, bufs, committed=True)
-pxla.global_result_handlers[(core.ShapedArray, pxla.OutputType.Array)] = _array_result_handler
-pxla.global_result_handlers[(core.ConcreteArray, pxla.OutputType.Array)] = _array_result_handler
+pxla.global_result_handlers[(core.ShapedArray, pxla.OutputType.Array)] = _array_global_result_handler
+pxla.global_result_handlers[(core.ConcreteArray, pxla.OutputType.Array)] = _array_global_result_handler
+
+
+def _array_local_result_handler(aval, sharding, indices):
+  return lambda bufs: Array(aval.shape, sharding, bufs, committed=True)
+pxla.local_result_handlers[(core.ShapedArray, pxla.OutputType.Array)] = _array_local_result_handler
+pxla.local_result_handlers[(core.ConcreteArray, pxla.OutputType.Array)] = _array_local_result_handler

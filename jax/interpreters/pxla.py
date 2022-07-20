@@ -509,9 +509,15 @@ def array_mapping_to_axis_resources(array_mapping: ArrayMapping):
   return PartitionSpec(*partitions)
 
 
+class OutputType(enum.Enum):
+  Array = 0
+  GlobalDeviceArray = 1
+  ShardedDeviceArray = 2
+
+
 def local_aval_to_result_handler(
     aval: core.AbstractValue,
-    sharding_spec: Optional[ShardingSpec],
+    sharding: XLACompatibleSharding,
     indices: Optional[Tuple[Index]],
 ) -> Callable[[List[xb.xla_client.Buffer]], Any]:
   """Returns a function for handling the raw buffers of a single output aval.
@@ -528,24 +534,25 @@ def local_aval_to_result_handler(
     for this output. The function will return an object suitable for returning
     to the user, e.g. a ShardedDeviceArray.
   """
+  if config.jax_array:
+    output_type = OutputType.Array
+  else:
+    output_type = OutputType.ShardedDeviceArray
   try:
-    return local_result_handlers[type(aval)](aval, sharding_spec, indices)
+    return local_result_handlers[(type(aval), output_type)](aval, sharding, indices)
   except KeyError as err:
     raise TypeError(
         f"No pxla_result_handler for type: {type(aval)}") from err
 
 PxlaResultHandler = Callable[..., Callable[[List[xb.xla_client.Buffer]], Any]]
-local_result_handlers: Dict[Type[core.AbstractValue], PxlaResultHandler] = {}
-def sda_array_result_handler(aval: ShapedArray, sharding_spec, indices):
+local_result_handlers: Dict[Tuple[Type[core.AbstractValue], OutputType], PxlaResultHandler] = {}
+
+def sda_array_result_handler(aval: ShapedArray, sharding, indices):
+  sharding_spec = _get_sharding_specs([sharding], [aval])[0]
   return lambda bufs: make_sharded_device_array(aval, sharding_spec, bufs,
                                                 indices)
-local_result_handlers[ShapedArray] = sda_array_result_handler
-local_result_handlers[ConcreteArray] = sda_array_result_handler
-
-
-class OutputType(enum.Enum):
-  Array = 0
-  GlobalDeviceArray = 1
+local_result_handlers[(ShapedArray, OutputType.ShardedDeviceArray)] = sda_array_result_handler
+local_result_handlers[(ConcreteArray, OutputType.ShardedDeviceArray)] = sda_array_result_handler
 
 
 def global_aval_to_result_handler(
@@ -1278,8 +1285,6 @@ class PmapExecutable(stages.XlaExecutable):
     ])
 
     local_arg_parts_ = parts.local_arg_parts or [None] * len(pci.avals)
-    # TODO(yashkatariya): Fix the input handling of `Array`s that span over
-    # multiple processes. Add multi-process tests for pmap.
     input_sharding_specs = [
         _pmap_sharding_spec(replicas.num_local_replicas, pci.axis_size,
                             parts.local_num_partitions, arg_parts, aval, in_axis)
@@ -1297,35 +1302,21 @@ class PmapExecutable(stages.XlaExecutable):
     if parts.local_out_parts is None:
       local_out_parts = (None,) * nouts
 
-    if config.jax_array:
-      global_unmapped_avals = [
+    local_out_avals = [
+      get_local_aval(aval, parts, lparts)
+      for aval, parts, lparts
+      in safe_zip(shards.out_sharded_avals, out_parts, local_out_parts)]
+    local_unmapped_avals = [
         core.unmapped_aval(pci.axis_size, pci.axis_name, out_axis, aval)
         if out_axis is not None else aval
-        for aval, out_axis in safe_zip(shards.out_sharded_avals, pci.out_axes)]
-      global_out_specs = [
-        _pmap_sharding_spec(replicas.num_global_replicas, pci.axis_size,
-                            parts.num_partitions, op, aval, out_axis)
-        for op, aval, out_axis in safe_zip(
-            out_parts, shards.out_sharded_avals, pci.out_axes)]
-      pmap_shardings = _get_pmap_sharding(device_assignment, global_out_specs)
-      handle_outs = global_avals_to_results_handler(
-          global_unmapped_avals, pmap_shardings)
-    else:
-      local_out_avals = [
-        get_local_aval(aval, parts, lparts)
-        for aval, parts, lparts
-        in safe_zip(shards.out_sharded_avals, out_parts, local_out_parts)]
-      local_unmapped_avals = [
-          core.unmapped_aval(pci.axis_size, pci.axis_name, out_axis, aval)
-          if out_axis is not None else aval
-          for aval, out_axis in safe_zip(local_out_avals, pci.out_axes)]
-      out_specs = [
-          _pmap_sharding_spec(replicas.num_local_replicas, pci.axis_size,
-                              parts.local_num_partitions, out_parts, aval, out_axis)
-          for out_parts, aval, out_axis in safe_zip(
-              local_out_parts, local_out_avals, pci.out_axes)]
-      pmap_shardings = _get_pmap_sharding(local_device_assignment, out_specs)
-      handle_outs = local_avals_to_results_handler(local_unmapped_avals, pmap_shardings)
+        for aval, out_axis in safe_zip(local_out_avals, pci.out_axes)]
+    out_specs = [
+        _pmap_sharding_spec(replicas.num_local_replicas, pci.axis_size,
+                            parts.local_num_partitions, out_parts, aval, out_axis)
+        for out_parts, aval, out_axis in safe_zip(
+            local_out_parts, local_out_avals, pci.out_axes)]
+    pmap_shardings = _get_pmap_sharding(local_device_assignment, out_specs)
+    handle_outs = local_avals_to_results_handler(local_unmapped_avals, pmap_shardings)
 
     if hasattr(pci.backend, "compile_replicated"):
       execute_fun = pci.backend.compile_replicated(
@@ -1557,13 +1548,11 @@ def _get_sharding_specs(
 def local_avals_to_results_handler(
     unmapped_local_out_avals: Sequence[Optional[ShapedArray]],
     local_shardings: Sequence[XLACompatibleSharding]) -> ResultsHandler:
-  local_out_specs = _get_sharding_specs(
-      local_shardings, cast(Sequence[ShapedArray], unmapped_local_out_avals))
   out_indices = [tuple(s.devices_indices_map(aval.shape).values())
                  for s, aval in safe_zip(local_shardings, unmapped_local_out_avals)]
   handlers = [
-      local_aval_to_result_handler(aval, spec, idcs)
-      for aval, spec, idcs in safe_zip(unmapped_local_out_avals, local_out_specs, out_indices)
+      local_aval_to_result_handler(aval, s, idcs)
+      for aval, s, idcs in safe_zip(unmapped_local_out_avals, local_shardings, out_indices)
   ]
   return ResultsHandler(handlers, local_shardings, unmapped_local_out_avals)
 
