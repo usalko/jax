@@ -31,6 +31,8 @@ PLEASE REMEMBER TO CHANGE THE '..main' WITH AN ACTUAL TAG in GITHUB LINK.
 * Deprecations:
   * {func}`jax.mask` {func}`jax.shapecheck` are being deprecated.
     See {jax-issue}`#11557`.
+  * {mod}`jax.experimental.loops` has been removed. See {jax-issue}`#10278`
+    for an alternative API.    
 
 ## jaxlib 0.3.15 (Unreleased)
 
