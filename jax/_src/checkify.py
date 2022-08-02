@@ -679,9 +679,8 @@ def pjit_error_check(error, enabled_errors, *vals_in, jaxpr,
                      in_positional_semantics, out_positional_semantics):
   checked_jaxpr, msgs = checkify_jaxpr(jaxpr, error, enabled_errors)
   new_vals_in = [error.err, error.code, error.payload, *vals_in]
-  # TODO(lenamartens, yashkatariya): replace with OpShardingSharding.
-  sharding = pxla._create_mesh_pspec_sharding(pxla.thread_resources.env.physical_mesh,
-                                              pxla.PartitionSpec(None))
+  sharding = pjit._replicated_op_sharding_sharding(
+      list(pxla.thread_resources.env.physical_mesh.devices.flat))
   pos_sem = maps._positional_semantics.val
   new_in_shardings = (*[sharding]*3, *in_shardings)
   new_out_shardings = (*[sharding]*3, *out_shardings)

@@ -41,7 +41,7 @@ from jax.experimental import array
 from jax.experimental.sharding import MeshPspecSharding, Sharding
 import jax.experimental.pjit as pjit_lib
 from jax.experimental.pjit import (pjit, pjit_p, with_sharding_constraint,
-                                   SpecSync, FROM_GDA, AUTO)
+                                   FROM_GDA, AUTO)
 from jax.interpreters import pxla
 from jax.interpreters import mlir
 from jax._src.lib import xla_client as xc, xla_bridge
@@ -505,22 +505,6 @@ class PJitTest(jtu.BufferDonationTestCase):
       self.assertAllClose(y, x * 2)
 
   @jtu.with_mesh([('x', 2)])
-  def testVmapModifiesAxisResources(self):
-    h = pjit(lambda x, y: (x + y, x, y), in_axis_resources=P('x'), out_axis_resources=None)
-    x = jnp.arange(4)
-    y = jnp.arange(5*4).reshape((5, 4))
-    jaxpr = jax.make_jaxpr(jax.vmap(h, in_axes=(None, 0)))(x, y).jaxpr
-    eqn = jaxpr.eqns[0]
-    self.assertIs(eqn.primitive, pjit_p)
-    x_sync, y_sync = (s._parsed_pspec.sync for s in eqn.params['in_shardings'])
-    self.assertEqual(x_sync, SpecSync.IN_SYNC)
-    self.assertEqual(y_sync, SpecSync.DIM_PERMUTE)
-    x_sync, y_sync, z_sync = (s._parsed_pspec.sync for s in eqn.params['out_shardings'])
-    self.assertEqual(x_sync, SpecSync.DIM_PERMUTE)
-    self.assertEqual(y_sync, SpecSync.IN_SYNC)
-    self.assertEqual(z_sync, SpecSync.DIM_PERMUTE)
-
-  @jtu.with_mesh([('x', 2)])
   def testVMap(self):
     f = pjit(lambda x, y: (x + y, x), in_axis_resources=P('x'), out_axis_resources=P('x'))
     x = jnp.arange(4)
@@ -539,10 +523,10 @@ class PJitTest(jtu.BufferDonationTestCase):
     jaxpr = jax.make_jaxpr(jax.vmap(f))(x)
     pjit_eqn, = jaxpr.eqns
     constraint_eqn, = pjit_eqn.params['jaxpr'].eqns
-    self.assertEqual(constraint_eqn.params['sharding']._parsed_pspec.partitions,
-                     (None, ('x',)))
-    self.assertEqual(constraint_eqn.params['sharding']._parsed_pspec.sync,
-                     SpecSync.DIM_PERMUTE)
+    op = constraint_eqn.params['sharding']._op_sharding
+    self.assertEqual(op.type, xc.OpSharding.Type.OTHER)
+    self.assertListEqual(op.tile_assignment_dimensions, [1, 2])
+    self.assertListEqual(op.tile_assignment_devices, [0, 1])
 
   @jtu.with_mesh([('x', 2), ('y', 1)])
   def testShardingInXMap(self):
@@ -556,8 +540,9 @@ class PJitTest(jtu.BufferDonationTestCase):
       nonlocal test_rule_called
       test_rule_called = True
       in_shardings = kwargs['in_shardings']
-      self.assertEqual(len(in_shardings), 1)
-      self.assertIn(('y',), in_shardings[0]._parsed_pspec.partitions)
+      self.assertLen(in_shardings, 1)
+      self.assertListEqual(in_shardings[0]._op_sharding.tile_assignment_dimensions,
+                           [1, 1, 2])
       return rule(*args, **kwargs)
     try:
       mlir._lowerings[pjit_p] = _test_rule
@@ -1121,13 +1106,14 @@ class GDAPjitTest(jtu.JaxTestCase):
     gda_obj = global_device_array.GlobalDeviceArray.from_callback(
         global_input_shape, global_mesh, mesh_axes, cb)
 
-    with self.assertRaisesRegex(
-        ValueError,
+    err_msg = re.compile(
         r"Got an input GDA to pjit with different partitioning than specified "
         r'in the in_axis_resources argument to pjit. The partitioning must match, or '
         r'use `jax.experimental.pjit.FROM_GDA` in `in_axis_resources` for GDA. '
         r"Got GDA sharding.*PartitionSpec\('x',\).*and "
-        r"pjit sharding.*PartitionSpec\(\('x',\), \('y',\)\).*"):
+        r"pjit sharding.*tile_assignment_dimensions: 4.*tile_assignment_dimensions: 2.*",
+        re.M | re.S)
+    with self.assertRaisesRegex(ValueError, err_msg):
       @partial(pjit, in_axis_resources=P('x', 'y'), out_axis_resources=P('x', 'y'))
       def f(x):
         return x
@@ -1851,7 +1837,8 @@ class PJitErrorTest(jtu.JaxTestCase):
              in_axes=['i', ...], out_axes=['i', ...], axis_resources={'i': 'x'})
     x = jnp.arange(4).reshape((2, 2))
     error = (r"pjit input has an axis resources specification of " +
-             spec_regex(spec) + r" that uses one or more "
+             spec_regex(pxla.array_mapping_to_axis_resources(
+                 pxla._get_array_mapping(spec))) + r" that uses one or more "
              "mesh axes already used by "
              r"xmap to partition a named axis appearing in its named_shape \(both "
              r"use mesh axes `x`\)")
@@ -1865,7 +1852,8 @@ class PJitErrorTest(jtu.JaxTestCase):
              in_axes=['i', ...], out_axes=['i', ...], axis_resources={'i': 'x'})
     x = jnp.arange(4).reshape((2, 2))
     error = (r"pjit output has an axis resources specification of " +
-             spec_regex(spec) + r" that uses one or more "
+             spec_regex(pxla.array_mapping_to_axis_resources(
+                 pxla._get_array_mapping(spec))) + r" that uses one or more "
              "mesh axes already used by "
              r"xmap to partition a named axis appearing in its named_shape \(both "
              r"use mesh axes `x`\)")
@@ -1879,7 +1867,8 @@ class PJitErrorTest(jtu.JaxTestCase):
              in_axes=['i', ...], out_axes=['i', ...], axis_resources={'i': 'x'})
     x = jnp.arange(4).reshape((2, 2))
     error = (r"with_sharding_constraint input has an axis resources specification of " +
-             spec_regex(spec) + r" that uses one or more "
+             spec_regex(pxla.array_mapping_to_axis_resources(
+                 pxla._get_array_mapping(spec))) + r" that uses one or more "
              "mesh axes already used by "
              r"xmap to partition a named axis appearing in its named_shape \(both "
              r"use mesh axes `x`\)")
