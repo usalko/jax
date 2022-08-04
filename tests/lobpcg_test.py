@@ -22,14 +22,16 @@ import functools
 import re
 import os
 
+from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
+from matplotlib import pyplot as plt
 import scipy.linalg as sla
 import scipy.sparse as sps
 
 import jax
+from jax.config import config
 from jax._src import test_util as jtu
-from jax._src.config import flags
 from jax.experimental.sparse import linalg, bcoo
 import jax.numpy as jnp
 
@@ -41,20 +43,22 @@ def _make_concrete_cases(f64):
   example_names = list(_concrete_generators(dtype))
   cases = []
   for name in example_names:
-    nkm = [(100, 10, 20)]
-    if not flags.FLAGS.jax_skip_slow_tests:
-      nkm.append((1000, 100, 200))
-    for n, k, m in nkm:
-      if name == 'ring laplacian':
-        m *= 3
-      if name.startswith('linear'):
-        m *= 2
-      if f64:
-        m *= 2
-      case = [('matrix_name', name), ('n', n), ('k', k), ('m', m)]
-      clean_matrix_name = _clean_matrix_name(name)
-      case.append(('testcase_name', f'{clean_matrix_name}_n{n}'))
-      cases.append(dict(case))
+    n, k, m = 100, 10, 20
+    if name == 'ring laplacian':
+      m *= 3
+    if name.startswith('linear'):
+      m *= 2
+    if f64:
+      m *= 2
+    clean_matrix_name = _clean_matrix_name(name)
+    case = {
+        'matrix_name': name,
+        'n': n,
+        'k': k,
+        'm': m,
+        'testcase_name': f'{clean_matrix_name}_n{n}'
+    }
+    cases.append(case)
 
   assert len({c['testcase_name'] for c in cases}) == len(cases)
   return cases
@@ -162,7 +166,7 @@ def _callable_generators(dtype):
   topk = 10
   d = {'id': _make_id_fn(n),
        'linear cond=1k': _make_diag_fn(np.linspace(1, 1000, n), 40),
-       'linear cond=100k':_make_diag_fn(np.linspace(1, 100 * 1000, n), 40),
+       'linear cond=100k': _make_diag_fn(np.linspace(1, 100 * 1000, n), 40),
        'geom cond=1k': _make_diag_fn(np.logspace(0, 3, n), 20),
        'geom cond=100k': _make_diag_fn(np.logspace(0, 5, n), 20),
        'ring laplacian': _make_ring_fn(n, 40),
@@ -174,7 +178,7 @@ def _callable_generators(dtype):
   ret = {}
   for k, (vec_mul_fn, eigs, m) in d.items():
     if jtu.num_float_bits(dtype) > 32:
-       m *= 3
+      m *= 3
     eigs.sort()
 
     # Note we must lift the vector multiply into matmul
@@ -182,6 +186,7 @@ def _callable_generators(dtype):
 
     ret[k] = (fn, eigs[::-1][:topk].astype(dtype), n, m)
   return ret
+
 
 @jtu.with_config(
     jax_enable_checks=True,
@@ -261,15 +266,17 @@ class LobpcgTest(jtu.JaxTestCase):
     self._possibly_plot(A, eigs, X, m, matrix_name)
 
   def _possibly_plot(self, A, eigs, X, m, matrix_name):
-    plot_dir = os.getenv('LOBPCG_DEBUG_PLOT_DIR')
-    if plot_dir is not None:
-      if isinstance(A, (np.ndarray, jnp.ndarray)):
-        lobpcg = linalg._lobpcg_standard_matrix
-      else:
-        lobpcg = linalg._lobpcg_standard_callable
-      _theta, _U, _i, info = lobpcg(A, X, m, tol=0, debug=True)
-      self._debug_plots(
-          X, eigs, info, matrix_name, plot_dir)
+    if not os.getenv('LOBPCG_EMIT_DEBUG_PLOTS'):
+      return
+
+    if isinstance(A, (np.ndarray, jnp.ndarray)):
+      lobpcg = linalg._lobpcg_standard_matrix
+    else:
+      lobpcg = linalg._lobpcg_standard_callable
+    _theta, _U, _i, info = lobpcg(A, X, m, tol=0, debug=True)
+    plot_dir = os.getenv('TEST_UNDECLARED_OUTPUTS_DIR')
+    assert plot_dir, 'expected TEST_UNDECLARED_OUTPUTS_DIR for lobpcg plots'
+    self._debug_plots(X, eigs, info, matrix_name, plot_dir)
 
   def _debug_plots(self, X, eigs, info, matrix_name, lobpcg_debug_plot_dir):
     os.makedirs(lobpcg_debug_plot_dir, exist_ok=True)
@@ -280,7 +287,6 @@ class LobpcgTest(jtu.JaxTestCase):
         lobpcg_debug_plot_dir,
         f'{clean_matrix_name}_n{n}_k{k}_{dt}.png')
 
-    from matplotlib import pyplot as plt
     plt.switch_backend('Agg')
 
     fig, (ax0, ax1, ax2, ax3) = plt.subplots(1, 4, figsize=(24, 4))
@@ -313,6 +319,7 @@ class LobpcgTest(jtu.JaxTestCase):
     ax3.set_title(prefix + rf' $\lambda_{{\max}}=\ ${eigs[0]:.1e}')
 
     fig.savefig(figpath, bbox_inches='tight')
+    plt.close(fig)
 
   def checkApproxEigs(self, example_name, dtype):
     fn, eigs, n, m = _callable_generators(dtype)[example_name]
@@ -345,6 +352,7 @@ class LobpcgTest(jtu.JaxTestCase):
       self.assertArraysAllClose(UTU[i], np.zeros_like(UTU[i]), atol=tol)
 
     self._possibly_plot(fn, eigs, X, m, 'callable_' + example_name)
+
 
 class F32LobpcgTest(LobpcgTest):
 
@@ -397,3 +405,8 @@ class F64LobpcgTest(LobpcgTest):
   @jtu.skip_on_devices("tpu", "iree", "gpu")
   def testCallableMatricesF64(self, matrix_name):
     self.checkApproxEigs(matrix_name, jnp.float64)
+
+
+if __name__ == '__main__':
+  config.parse_flags_with_absl()
+  absltest.main(testLoader=jtu.JaxTestLoader())
