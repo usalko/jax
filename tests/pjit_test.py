@@ -38,10 +38,10 @@ from jax.experimental import PartitionSpec as P
 from jax.experimental.maps import xmap
 from jax.experimental import global_device_array
 from jax.experimental import array
-from jax.experimental.sharding import MeshPspecSharding, Sharding
+from jax.experimental.sharding import MeshPspecSharding, Sharding, OpShardingSharding
 import jax.experimental.pjit as pjit_lib
 from jax.experimental.pjit import (pjit, pjit_p, with_sharding_constraint,
-                                   SpecSync, FROM_GDA, AUTO)
+                                   FROM_GDA, AUTO)
 from jax.interpreters import pxla
 from jax.interpreters import mlir
 from jax._src.lib import xla_client as xc, xla_bridge
@@ -419,6 +419,26 @@ class PJitTest(jtu.BufferDonationTestCase):
     self.assertIn("unspecified_dims=[0]", mhlo_str)
     self.assertIn("unspecified_dims=[1]", mhlo_str)
 
+  @jtu.with_mesh([('x', 2), ('y', 2)])
+  def testShardingConstraintPyTreeVmapWithUnconstrainedDims(self):
+
+    @partial(pjit, in_axis_resources=None, out_axis_resources=None)
+    def f(x):
+      x = jax.vmap(lambda x: with_sharding_constraint(
+          x, [P(P.UNCONSTRAINED, 'y'),
+              P('x', P.UNCONSTRAINED)]))(x)
+      x = x.copy()
+      x[0]['a'] *= 2
+      return x
+
+    shape = (2, 8, 8)
+    v = np.arange(prod(shape)).reshape(shape)
+    x = [{'a': v, 'b': v * 2}, v * 3]
+
+    mhlo_str = str(f.lower(x).compiler_ir(dialect="mhlo"))
+    self.assertIn("unspecified_dims=[1]", mhlo_str)
+    self.assertIn("unspecified_dims=[2]", mhlo_str)
+
   def testCaching(self):
     def f(x):
       assert should_be_tracing
@@ -505,22 +525,6 @@ class PJitTest(jtu.BufferDonationTestCase):
       self.assertAllClose(y, x * 2)
 
   @jtu.with_mesh([('x', 2)])
-  def testVmapModifiesAxisResources(self):
-    h = pjit(lambda x, y: (x + y, x, y), in_axis_resources=P('x'), out_axis_resources=None)
-    x = jnp.arange(4)
-    y = jnp.arange(5*4).reshape((5, 4))
-    jaxpr = jax.make_jaxpr(jax.vmap(h, in_axes=(None, 0)))(x, y).jaxpr
-    eqn = jaxpr.eqns[0]
-    self.assertIs(eqn.primitive, pjit_p)
-    x_sync, y_sync = (s._parsed_pspec.sync for s in eqn.params['in_shardings'])
-    self.assertEqual(x_sync, SpecSync.IN_SYNC)
-    self.assertEqual(y_sync, SpecSync.DIM_PERMUTE)
-    x_sync, y_sync, z_sync = (s._parsed_pspec.sync for s in eqn.params['out_shardings'])
-    self.assertEqual(x_sync, SpecSync.DIM_PERMUTE)
-    self.assertEqual(y_sync, SpecSync.IN_SYNC)
-    self.assertEqual(z_sync, SpecSync.DIM_PERMUTE)
-
-  @jtu.with_mesh([('x', 2)])
   def testVMap(self):
     f = pjit(lambda x, y: (x + y, x), in_axis_resources=P('x'), out_axis_resources=P('x'))
     x = jnp.arange(4)
@@ -539,10 +543,11 @@ class PJitTest(jtu.BufferDonationTestCase):
     jaxpr = jax.make_jaxpr(jax.vmap(f))(x)
     pjit_eqn, = jaxpr.eqns
     constraint_eqn, = pjit_eqn.params['jaxpr'].eqns
-    self.assertEqual(constraint_eqn.params['sharding']._parsed_pspec.partitions,
-                     (None, ('x',)))
-    self.assertEqual(constraint_eqn.params['sharding']._parsed_pspec.sync,
-                     SpecSync.DIM_PERMUTE)
+    op = constraint_eqn.params['sharding']._op_sharding
+    self.assertEqual(op.type, xc.OpSharding.Type.OTHER)
+    self.assertListEqual(op.tile_assignment_dimensions, [1, 2])
+    self.assertListEqual(op.tile_assignment_devices, [0, 1])
+    self.assertFalse(pxla.is_op_sharding_replicated(op))
 
   @jtu.with_mesh([('x', 2), ('y', 1)])
   def testShardingInXMap(self):
@@ -556,8 +561,11 @@ class PJitTest(jtu.BufferDonationTestCase):
       nonlocal test_rule_called
       test_rule_called = True
       in_shardings = kwargs['in_shardings']
-      self.assertEqual(len(in_shardings), 1)
-      self.assertIn(('y',), in_shardings[0]._parsed_pspec.partitions)
+      self.assertLen(in_shardings, 1)
+      self.assertListEqual(in_shardings[0]._op_sharding.tile_assignment_dimensions,
+                           [1, 1, 2])
+      self.assertFalse(pxla.is_op_sharding_replicated(in_shardings[0]._op_sharding))
+
       return rule(*args, **kwargs)
     try:
       mlir._lowerings[pjit_p] = _test_rule
@@ -1127,7 +1135,7 @@ class GDAPjitTest(jtu.JaxTestCase):
         r'in the in_axis_resources argument to pjit. The partitioning must match, or '
         r'use `jax.experimental.pjit.FROM_GDA` in `in_axis_resources` for GDA. '
         r"Got GDA sharding.*PartitionSpec\('x',\).*and "
-        r"pjit sharding.*PartitionSpec\(\('x',\), \('y',\)\).*"):
+        r"pjit sharding.*PartitionSpec\('x', 'y'\).*"):
       @partial(pjit, in_axis_resources=P('x', 'y'), out_axis_resources=P('x', 'y'))
       def f(x):
         return x
@@ -1491,6 +1499,17 @@ class ArrayPjitTest(jtu.JaxTestCase):
         self.assertArraysEqual(out._value, input_data)
 
   def test_unspecified_out_axis_resources(self):
+
+    def _checks(out, input_data):
+      self.assertIsInstance(out, array.Array)
+      self.assertIsInstance(out.sharding, OpShardingSharding)
+      self.assertEqual(out.shape, (8, 2))
+      self.assertEqual(out.addressable_shards[0].data.shape, (2, 1))
+      for s in out.addressable_shards:
+        self.assertLen(s.data._arrays, 1)
+        self.assertArraysEqual(s.data._arrays[0], input_data[s.index])
+      self.assertArraysEqual(out._value, input_data)
+
     global_input_shape = (8, 2)
     global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
     mesh_axes = P('x', 'y')
@@ -1502,13 +1521,10 @@ class ArrayPjitTest(jtu.JaxTestCase):
         f = pjit(lambda x: x)
 
         out = f(input_array)
-        self.assertIsInstance(out, array.Array)
-        self.assertEqual(out.shape, (8, 2))
-        self.assertEqual(out.addressable_shards[0].data.shape, (2, 1))
-        for s in out.addressable_shards:
-          self.assertLen(s.data._arrays, 1)
-          self.assertArraysEqual(s.data._arrays[0], input_data[s.index])
-        self.assertArraysEqual(out._value, input_data)
+        _checks(out, input_data)
+
+        out2 = f(out)
+        _checks(out2, input_data)
 
   @parameterized.named_parameters(
     ('mesh1', (4, 2), (2, 1), (2, 2), (1, 2), (8, 2)),
@@ -2133,6 +2149,48 @@ class UtilTest(jtu.JaxTestCase):
       hs1 = xc.HloSharding.from_proto(op1)
       hs2 = xc.HloSharding.from_proto(op2)
       self.assertNotEqual(hash(hs1), hash(hs2))
+
+  def test_op_sharding_semantically_replicated(self):
+    if xla_extension_version < 81:
+      raise unittest.SkipTest(
+          'HloSharding is not available for this test so it cannot be tested.')
+
+    op1 = xc.OpSharding()
+    op1.type = xc.OpSharding.Type.OTHER
+    op1.tile_assignment_dimensions = [1, 1, 2]
+    op1.tile_assignment_devices = [0, 1]
+    op1.last_tile_dims = [xc.OpSharding.Type.REPLICATED]
+
+    op2 = xc.OpSharding()
+    op2.type = xc.OpSharding.Type.REPLICATED
+
+    self.assertTrue(pxla.is_op_sharding_replicated(op1))
+    self.assertTrue(pxla.are_op_shardings_equal(op1, op2))
+
+  def test_op_sharding_manual_replicated(self):
+    if xla_extension_version < 81:
+      raise unittest.SkipTest(
+          'HloSharding is not available for this test so it cannot be tested.')
+
+    op1 = xc.OpSharding()
+    op1.type = xc.OpSharding.Type.OTHER
+    op1.tile_assignment_dimensions = [1, 1, 2, 1]
+    op1.tile_assignment_devices = [0, 1]
+    op1.last_tile_dims = [xc.OpSharding.Type.REPLICATED, xc.OpSharding.Type.MANUAL]
+
+    op2 = xc.OpSharding()
+    op2.type = xc.OpSharding.Type.OTHER
+    op2.tile_assignment_dimensions = [1, 1, 1, 2]
+    op2.tile_assignment_devices = [0, 1]
+    op2.last_tile_dims = [xc.OpSharding.Type.MANUAL, xc.OpSharding.Type.REPLICATED]
+
+    op3 = xc.OpSharding()
+    op3.type = xc.OpSharding.Type.REPLICATED
+
+    self.assertTrue(pxla.is_op_sharding_replicated(op1))
+    self.assertTrue(pxla.is_op_sharding_replicated(op2))
+    self.assertTrue(pxla.are_op_shardings_equal(op1, op2))
+    self.assertTrue(pxla.are_op_shardings_equal(op1, op3))
 
 
 if __name__ == '__main__':
