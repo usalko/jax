@@ -1750,17 +1750,9 @@ tan_p = standard_unop(_float | _complex, 'tan')
 ad.defjvp2(tan_p, lambda g, ans, x: mul(g, _const(x, 1) + square(ans)))
 mlir.register_lowering(tan_p, partial(_nary_lower_mhlo, chlo.TanOp))
 
-def asin_impl(x):
-  if dtypes.issubdtype(_dtype(x), np.complexfloating):
-    return mul(_const(x, -1j), asinh(mul(_const(x, 1j), x)))
-  else:
-    return mul(_const(x, 2),
-               atan2(x, add(_const(x, 1), sqrt(sub(_const(x, 1), square(x))))))
-
 asin_p = standard_unop(_float | _complex, 'asin')
 ad.defjvp(asin_p, lambda g, x: mul(g, rsqrt(_const(x, 1) - square(x))))
-mlir.register_lowering(asin_p, mlir.lower_fun(asin_impl,
-                                              multiple_results=False))
+mlir.register_lowering(asin_p, partial(_nary_lower_mhlo, chlo.AsinOp))
 
 def acos_impl(x):
   if dtypes.issubdtype(_dtype(x), np.complexfloating):
@@ -1784,13 +1776,9 @@ ad.defjvp(acos_p, lambda g, x: mul(g, -rsqrt(_const(x, 1) - square(x))))
 mlir.register_lowering(acos_p,
                        mlir.lower_fun(acos_impl, multiple_results=False))
 
-def atan_impl(x):
-  return atan2(x, _const(x, 1))
-
 atan_p = standard_unop(_float | _complex, 'atan')
 ad.defjvp(atan_p, lambda g, x: div(g, _const(x, 1) + square(x)))
-mlir.register_lowering(atan_p, mlir.lower_fun(atan_impl,
-                                              multiple_results=False))
+mlir.register_lowering(atan_p, partial(_nary_lower_mhlo, chlo.AtanOp))
 
 atan2_p = standard_naryop([_float | _complex, _float | _complex], 'atan2')
 ad.defjvp(atan2_p,
