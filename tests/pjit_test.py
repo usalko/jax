@@ -1515,20 +1515,6 @@ class ArrayPjitTest(jtu.JaxTestCase):
         self.assertArraysEqual(s.data._arrays[0], expected_matrix_mul[s.index])
       self.assertArraysEqual(out._value, expected_matrix_mul)
 
-  def test_non_array_input_error(self):
-    input_shape = (8, 2)
-    global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
-    input_data = np.arange(
-        prod(input_shape), dtype=np.float32).reshape(input_shape)
-    with jax._src.config.jax_array(True):
-      with global_mesh:
-        f = pjit(lambda x: x,
-                 out_axis_resources=MeshPspecSharding(
-                     global_mesh, P('x', 'y')))
-        with self.assertRaisesRegex(
-            ValueError, 'Please specify sharding either on the arg or on pjit'):
-          f(input_data)
-
   def test_numpy_array_input(self):
     input_shape = (8, 2)
     global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
@@ -1849,6 +1835,22 @@ class ArrayPjitTest(jtu.JaxTestCase):
     self.assertEqual(cache_info2.misses, cache_info1.misses + 1)
     self.assertArraysEqual(out1, val1)
     self.assertArraysEqual(out2, val2)
+
+  @jax._src.config.jax_array(True)
+  def test_grad_of_pjit_single_device_sharding(self):
+    a = jnp.array(16, dtype=jnp.float32)
+    f = lambda x: x
+    out = jax.grad(pjit(f))(a)
+    self.assertIsInstance(out, array.Array)
+    self.assertArraysEqual(out, jax.grad(f)(a))
+
+  @jax._src.config.jax_array(True)
+  def test_autodiff_with_single_device_sharding(self):
+    # Add a constant captured by the nested pjit to make things more complicated
+    h = jnp.arange(4.)
+    f = pjit(lambda x: x.sum(1) * h.sum())
+    g = pjit(lambda x: f(jnp.sin(x * 4 + 2)))
+    jtu.check_grads(g, (jnp.arange(16.).reshape((4, 4)) / 100,), order=2)
 
 
 def spec_regex(s):

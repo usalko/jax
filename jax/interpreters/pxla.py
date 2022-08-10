@@ -2346,16 +2346,22 @@ class PartitionSpec(tuple):
 
 def _get_backend_from_shardings(
     shardings: Iterable[XLACompatibleSharding]) -> Tuple[xb.XlaBackend, XLACompatibleSharding]:
-  da = None
+  first_da = None
   first_sharding = None
   for s in shardings:
     if _is_unspecified(s):
       continue
+    if first_da is None:
+      first_da = s._device_assignment
+      first_sharding = s
     da = s._device_assignment
-    first_sharding = s
-    break
-  assert len(da) > 0  # type: ignore
-  return xb.get_device_backend(da[0]), first_sharding  # type: ignore
+    if first_da != da:
+      raise ValueError('Devices across Array inputs and outputs should be the '
+                       'same. '
+                       f"Got array devices: {first_da},\n "
+                       f"another array devices: {da}")
+  assert len(first_da) > 0  # type: ignore
+  return xb.get_device_backend(first_da[0]), first_sharding  # type: ignore
 
 
 @profiler.annotate_function
@@ -2387,7 +2393,7 @@ def lower_sharding_computation(
   with dispatch.log_elapsed_time(f"Finished tracing + transforming {name_stack} "
                                  "in {elapsed_time} sec"):
     jaxpr, out_jaxpr_avals, consts = pe.trace_to_jaxpr_final(fun, in_jaxpr_avals)
-  assert len(out_shardings) == len(out_jaxpr_avals)
+  assert len(out_shardings) == len(out_jaxpr_avals), (len(out_shardings), len(out_jaxpr_avals))
 
   global_out_avals = out_jaxpr_avals
 
@@ -2779,7 +2785,7 @@ class MeshExecutable(stages.XlaExecutable):
         assert mesh is not None
         in_shardings, out_shardings = _get_mesh_pspec_shardings_from_executable(
             xla_executable, mesh)
-      elif out_shardings and all(_is_unspecified(o) for o in out_shardings):
+      elif out_shardings and any(_is_unspecified(o) for o in out_shardings):
         assert mesh is None
         in_shardings, out_shardings = _get_op_sharding_shardings_from_executable(
             xla_executable, first_sharding._device_assignment,
