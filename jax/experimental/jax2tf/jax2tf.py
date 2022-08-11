@@ -782,6 +782,14 @@ def _to_jax_dtype(tf_dtype):
   return dtypes.canonicalize_dtype(tf_dtype.as_numpy_dtype)
 
 
+def _maybe_decode_gda(x):
+  # Get gda._value() for GlobalDeviceArray.
+  # Note gda._value() does not support multi-process mode.
+  if type(x).__name__ == "GlobalDeviceArray":
+    return x._value
+  return x
+
+
 def _tfval_to_tensor_jax_dtype(val: TfVal,
                                jax_dtype: Optional[DType] = None,
                                memoize_constants=False) -> Tuple[TfVal, DType]:
@@ -828,7 +836,8 @@ def _tfval_to_tensor_jax_dtype(val: TfVal,
       # The float0 type is not known to TF.
       if jax_dtype == dtypes.float0:
         val = np.zeros(np.shape(val), conversion_dtype.as_numpy_dtype)
-      tf_val = tf.convert_to_tensor(val, dtype=conversion_dtype)
+      tf_val = tf.convert_to_tensor(
+          _maybe_decode_gda(val), dtype=conversion_dtype)
       if do_memoize:
         _thread_local_state.constant_cache[const_key] = (val, tf_val)
     return tf_val, jax_dtype
