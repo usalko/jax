@@ -1696,9 +1696,7 @@ def _round_lower(ctx, x, *, rounding_method):
     return mhlo.RoundOp(x).results
   else:
     assert rounding_method is RoundingMethod.TO_NEAREST_EVEN
-    round_nearest = mlir.cache_lowering(mlir.lower_fun(_round_to_nearest_even,
-                                                       multiple_results=False))
-    return round_nearest(ctx, x)
+    return mhlo.RoundNearestEvenOp(x).results
 mlir.register_lowering(round_p, _round_lower)
 
 is_finite_p = unop(_fixed_dtype(np.bool_), _float, 'is_finite')
