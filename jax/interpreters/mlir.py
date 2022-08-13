@@ -400,6 +400,7 @@ class ModuleContext:
   module: ir.Module
   ip: ir.InsertionPoint
   symbol_table: ir.SymbolTable
+  backend: Any
   platform: str
   axis_context: AxisContext
   name_stack: NameStack
@@ -417,6 +418,7 @@ class ModuleContext:
 
   def __init__(
       self,
+      backend: Any,
       platform: str,
       axis_context: AxisContext,
       name_stack: NameStack,
@@ -436,6 +438,7 @@ class ModuleContext:
     self.module = module or ir.Module.create(loc=ir.Location.unknown(self.context))
     self.ip = ip or ir.InsertionPoint(self.module.body)
     self.symbol_table = symbol_table or ir.SymbolTable(self.module.operation)
+    self.backend = backend
     self.platform = platform
     self.axis_context = axis_context
     self.name_stack = name_stack
@@ -555,6 +558,7 @@ def lower_jaxpr_to_module(
     jaxpr: core.ClosedJaxpr,
     unordered_effects: List[core.Effect],
     ordered_effects: List[core.Effect],
+    backend: Any,
     platform: str,
     axis_context: AxisContext,
     name_stack: NameStack,
@@ -604,7 +608,7 @@ def lower_jaxpr_to_module(
   # Create a keepalives list that will be mutated during the lowering.
   keepalives: List[Any] = []
   host_callbacks: List[Any] = []
-  ctx = ModuleContext(platform, axis_context, name_stack, keepalives,
+  ctx = ModuleContext(backend, platform, axis_context, name_stack, keepalives,
                       channel_iter, host_callbacks)
   with ctx.context, ir.Location.unknown(ctx.context):
     # Remove module name characters that XLA would alter. This ensures that
@@ -1427,14 +1431,19 @@ def receive_from_host(channel: int, token: mhlo.TokenType,
   return token, result
 
 
-def _emit_tpu_python_callback(backend: xb.XlaBackend, ctx: LoweringRuleContext,
-    callback, token: Optional[Any], operands: List[ir.Value],
+def _emit_tpu_python_callback(
+    backend: Any,
+    ctx: LoweringRuleContext,
+    callback,
+    token: Optional[Any],
+    operands: List[ir.Value],
     operand_avals: List[core.ShapedArray],
     operand_shapes: List[xc.Shape],
     result_avals: List[core.ShapedArray],
-    result_shapes: List[xc.Shape], *,
+    result_shapes: List[xc.Shape],
+    *,
     sharding: Optional[xc.OpSharding] = None
-    ) -> Tuple[List[ir.Value], Any, Any]:
+) -> Tuple[List[ir.Value], Any, Any]:
   token = token or mhlo.CreateTokenOp(mhlo.TokenType.get()).result
   _wrapped_callback = callback
 
@@ -1519,7 +1528,7 @@ def emit_python_callback(
   if platform not in {"cpu", "cuda", "rocm", "tpu"}:
     raise ValueError(
         f"`EmitPythonCallback` not supported on {platform} backend.")
-  backend = xb.get_backend(platform)
+  backend = ctx.module_context.backend
   result_shapes = util.flatten(
       [xla.aval_to_xla_shapes(result_aval) for result_aval in result_avals])
   operand_shapes = util.flatten(

@@ -1168,9 +1168,15 @@ def lower_parallel_callable(
     unordered_effects = [eff for eff in closed_jaxpr.effects
                          if eff not in core.ordered_effects]
     lowering_result = mlir.lower_jaxpr_to_module(
-        module_name, closed_jaxpr, unordered_effects, [],
-        backend.platform, mlir.ReplicaAxisContext(axis_env),
-        name_stack, donated_invars, replicated_args=replicated_args,
+        module_name,
+        closed_jaxpr,
+        unordered_effects, [],
+        backend,
+        backend.platform,
+        mlir.ReplicaAxisContext(axis_env),
+        name_stack,
+        donated_invars,
+        replicated_args=replicated_args,
         arg_shardings=_shardings_to_mlir_shardings(parts.arg_parts),
         result_shardings=_shardings_to_mlir_shardings(parts.out_parts))
     module, keepalive, host_callbacks = (
@@ -2420,9 +2426,17 @@ def lower_sharding_computation(
   unordered_effects = [eff for eff in closed_jaxpr.effects
                        if eff not in core.ordered_effects]
   lowering_result = mlir.lower_jaxpr_to_module(
-      module_name, closed_jaxpr, unordered_effects, [], backend.platform,
-      axis_ctx, name_stack, donated_invars, replicated_args=replicated_args,
-      arg_shardings=in_op_shardings, result_shardings=out_op_shardings)
+      module_name,
+      closed_jaxpr,
+      unordered_effects, [],
+      backend,
+      backend.platform,
+      axis_ctx,
+      name_stack,
+      donated_invars,
+      replicated_args=replicated_args,
+      arg_shardings=in_op_shardings,
+      result_shardings=out_op_shardings)
   module, keepalive, host_callbacks = (
       lowering_result.module, lowering_result.keepalive,
       lowering_result.host_callbacks)
@@ -2557,9 +2571,17 @@ def lower_mesh_computation(
     unordered_effects = [eff for eff in closed_jaxpr.effects
                          if eff not in core.ordered_effects]
     lowering_result = mlir.lower_jaxpr_to_module(
-        module_name, closed_jaxpr, unordered_effects, [], backend.platform,
-        axis_ctx, name_stack, donated_invars, replicated_args=replicated_args,
-        arg_shardings=in_partitions, result_shardings=out_partitions)
+        module_name,
+        closed_jaxpr,
+        unordered_effects, [],
+        backend,
+        backend.platform,
+        axis_ctx,
+        name_stack,
+        donated_invars,
+        replicated_args=replicated_args,
+        arg_shardings=in_partitions,
+        result_shardings=out_partitions)
     module, keepalive, host_callbacks = (
         lowering_result.module, lowering_result.keepalive,
         lowering_result.host_callbacks)
