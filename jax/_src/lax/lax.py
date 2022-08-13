@@ -1299,10 +1299,19 @@ def full_like(x: Array, fill_value: Array, dtype: Optional[DType] = None,
     An ndarray with the same shape as `x` with its entries set equal to
     `fill_value`, similar to the output of np.full.
   """
+  from jax.experimental import sharding, array
+
   fill_shape = np.shape(x) if shape is None else canonicalize_shape(shape)
   weak_type = dtype is None and dtypes.is_weakly_typed(x)
   dtype = dtype or _dtype(x)
-  return full(fill_shape, _convert_element_type(fill_value, dtype, weak_type))
+  val = full(fill_shape, _convert_element_type(fill_value, dtype, weak_type))
+  # If the sharding is SingleDeviceSharding then don't take the `if` branch
+  # because `val` is already an array with SingleDeviceSharding.
+  if (config.jax_array and hasattr(x, 'sharding') and
+      not isinstance(x.sharding, sharding.SingleDeviceSharding)):
+    return array.make_array_from_callback(
+        fill_shape, x.sharding, lambda idx: val[idx])
+  return val
 
 
 def collapse(operand: Array, start_dimension: int,
