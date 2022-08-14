@@ -1644,6 +1644,16 @@ _POLY_SHAPE_TEST_HARNESSES = [
                                               "VALID"),
                   [RandArg((3, 8), _f32)],
                   poly_axes=[0]),
+    # https://github.com/google/jax/issues/11804
+    # Use the reshape trick to simulate a polymorphic dimension of 16*b.
+    # (See test "conv_general_dilated.1d_1" above for more details.)
+    _make_harness("reduce_window", "add",
+                  # x.shape = (1, 16*b, 1)
+                  lambda x: lax.reduce_window(
+                      jnp.reshape(x, (1, -1, 1)),
+                      0., lax.add, (1, 4, 1), (1, 2, 1), "VALID"),
+                  [RandArg((1, 1, 16), _f32)],
+                  poly_axes=[1]),
     # TODO(necula): not yet supported, but also unlikely to come up.
     # _make_harness("random_uniform", "odd",
     #               lambda key, a: jax.random.uniform(key, (2 * a.shape[0] + 1, a.shape[1]),
