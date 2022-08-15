@@ -20,6 +20,12 @@ import functools
 import jax
 import jax.numpy as jnp
 
+from jax import core
+from jax.interpreters import mlir
+from jax.interpreters import xla
+
+from jax._src.lib import gpu_solver
+
 import numpy as np
 
 def lobpcg_standard(
@@ -501,3 +507,27 @@ def _extend_basis(X, m):
   h = -2 * jnp.linalg.multi_dot(
       [w, w[k:, :].T, other], precision=jax.lax.Precision.HIGHEST)
   return h.at[k:].add(other)
+
+
+# Sparse direct solve via QR factorization
+
+
+def _spsolve_abstract_eval(data, indices, indptr, b, tol, reorder):
+  del data, indices, indptr, tol, reorder
+  return core.raise_to_shaped(b)
+
+
+def _spsolve_gpu_lowering(ctx, data, indices, indptr, b, tol, reorder):
+  data_aval, _, _, _, = ctx.avals_in
+
+  return gpu_solver.cuda_csrlsvqr(data_aval.dtype, data, indices,
+                                  indptr, b, tol, reorder)
+
+spsolve_p = core.Primitive('spsolve')
+spsolve_p.def_impl(functools.partial(xla.apply_primitive, spsolve_p))
+spsolve_p.def_abstract_eval(_spsolve_abstract_eval)
+mlir.register_lowering(spsolve_p, _spsolve_gpu_lowering, platform='cuda')
+
+def spsolve(data, indices, indptr, b, tol=1e-6, reorder=1):
+  return spsolve_p.bind(data, indices, indptr, b, tol=tol, reorder=reorder)
+

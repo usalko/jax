@@ -34,6 +34,7 @@ from jax.experimental.sparse import bcoo as sparse_bcoo
 from jax.experimental.sparse.bcoo import BCOOInfo
 from jax import lax
 from jax._src.lib import gpu_sparse
+from jax._src.lib import gpu_solver
 from jax._src.lib import xla_bridge
 from jax import jit
 from jax import tree_util
@@ -2317,6 +2318,32 @@ class SparseRandomTest(jtu.JaxTestCase):
       * np.prod(batch_shape) * np.prod(dense_shape))
     num_nonzero = (mat_dense != 0).sum()
     self.assertAlmostEqual(int(num_nonzero), approx_expected_num_nonzero, delta=2)
+
+
+class SparseSolverTest(jtu.JaxTestCase):
+  @parameterized.named_parameters(jtu.cases_from_list(
+      {"testcase_name": "_re{}_({})".format(reorder,
+        jtu.format_shape_dtype_string((size, size), dtype)),
+       "size": size, "reorder": reorder, "dtype": dtype}
+      for size in [20, 50, 100]
+      for reorder in [0, 1, 2, 3]
+      for dtype in jtu.dtypes.floating + jtu.dtypes.complex))
+  @unittest.skipIf(not GPU_LOWERING_ENABLED, "test requires cusparse/hipsparse")
+  @unittest.skipIf(jtu.device_under_test() != "gpu", "test requires GPU")
+  @jtu.skip_on_devices("rocm")
+  def test_sparse_qr_linear_solver(self, size, reorder, dtype):
+    rng = rand_sparse(self.rng())
+    a = rng((size, size), dtype)
+    nse = (a != 0).sum()
+    data, indices, indptr = sparse.csr_fromdense(a, nse=nse)
+
+    rng_k = jax.random.PRNGKey(1741)
+    b = jax.random.normal(rng_k, (size,), dtype=dtype)
+
+    tol = 1e-8
+    x = sparse.linalg.spsolve(data, indices, indptr, b, tol, reorder)
+
+    self.assertAllClose(a @ x, b, rtol=1e-2)
 
 
 if __name__ == "__main__":
