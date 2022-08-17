@@ -92,15 +92,20 @@ class Array:
   # TODO(yashkatariya): Add __slots__ here.
 
   def __init__(self, shape: Shape, sharding: Sharding,
-               arrays: Union[Sequence[DeviceArray], Sequence[Array]], committed: bool):
+               arrays: Union[xc.PyShardedBuffer, Sequence[DeviceArray], Sequence[Array]], committed: bool):
     self._shape = shape
     self._sharding = sharding
     # Extract DeviceArrays from arrays with `SingleDeviceSharding` to keep the
     # code handling `self._arrays` simpler.
     # TODO(yashkatariya): This will be slower as it will happen during
     # `__init__` on single controller environment. Make it lazy.
-    self._arrays: List[DeviceArray] = [a if isinstance(a, DeviceArray) else a._arrays[0]
-                                       for a in arrays]
+    if isinstance(arrays, xc.PyShardedBuffer):
+      self._arrays: List[DeviceArray] = cast(xc.PyShardedBuffer,
+                                             arrays).get_device_buffers()
+    else:
+      self._arrays: List[DeviceArray] = [
+          a if isinstance(a, DeviceArray) else a._arrays[0] for a in arrays
+      ]
     # See https://jax.readthedocs.io/en/latest/faq.html#controlling-data-and-computation-placement-on-devices
     # for what committed means.
     self._committed = committed

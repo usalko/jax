@@ -16,7 +16,7 @@ from collections import Counter
 import dataclasses
 import functools
 import numpy as np
-from typing import Callable, Sequence, Tuple, Union, Mapping, Optional, List, Dict, NamedTuple
+from typing import Callable, cast, Sequence, Tuple, Union, Mapping, Optional, List, Dict, NamedTuple
 
 from jax import core
 from jax._src import api_util
@@ -254,14 +254,22 @@ class GlobalDeviceArray:
 
   """
 
-  def __init__(self, global_shape: Shape, global_mesh: pxla.Mesh,
-               mesh_axes: MeshAxes, device_buffers: Sequence[DeviceArray],
+  def __init__(self,
+               global_shape: Shape,
+               global_mesh: pxla.Mesh,
+               mesh_axes: MeshAxes,
+               device_buffers: Union[xc.PyShardedBuffer,
+                                     Sequence[DeviceArray]],
                _gda_fast_path_args: Optional[_GdaFastPathArgs] = None,
                _enable_checks: bool = True):
     self._global_shape = global_shape
     self._global_mesh = global_mesh
     self._mesh_axes = mesh_axes
-    self._device_buffers = device_buffers
+    if isinstance(device_buffers, xc.PyShardedBuffer):
+      self._sharded_buffer = cast(xc.PyShardedBuffer, device_buffers)
+    else:
+      self._sharded_buffer = xc.PyShardedBuffer.create_sharded_buffer(device_buffers)
+      self._device_buffers = device_buffers
     # Optionally precomputed for performance.
     self._gda_fast_path_args = _gda_fast_path_args
     self._current_process = xb.process_index()
@@ -285,7 +293,7 @@ class GlobalDeviceArray:
           f"Expected shard shape {ss} doesn't match the device buffer "
           f"shape, got: {[db.shape for db in device_buffers]}")
 
-    dtype = device_buffers[0].dtype
+    dtype = cast(xc.PyShardedBuffer, self._sharded_buffer).dtype
     if _enable_checks or config.jax_enable_checks:
       assert all(db.dtype == dtype for db in device_buffers), (
           "Input arrays to GlobalDeviceArray must have matching dtypes, "
@@ -341,7 +349,8 @@ class GlobalDeviceArray:
         self._global_shape, self._global_mesh, self.mesh_axes)
 
     out = []
-    for db in self._device_buffers:
+    device_buffers = self._sharded_buffer.get_device_buffers()
+    for db in device_buffers:
       db = pxla._set_aval(db)
       device = db.device()
       index, rid = global_indices_rid[device]
@@ -364,7 +373,8 @@ class GlobalDeviceArray:
     # multiple accesses should be cheap.
     global_indices_rid = get_shard_indices_replica_ids(
         self._global_shape, self._global_mesh, self.mesh_axes)
-    device_to_buffer = {db.device(): db for db in self._device_buffers}
+    device_buffers = self._sharded_buffer.get_device_buffers()
+    device_to_buffer = {db.device(): db for db in device_buffers}
     global_shards = []
     for device, (index, rid) in global_indices_rid.items():
       local_shard = device.process_index == self._current_process
@@ -390,11 +400,11 @@ class GlobalDeviceArray:
     return npy_value
 
   def local_data(self, index) -> DeviceArray:
-    return pxla._set_aval(self._device_buffers[index])
+    device_buffer = self._sharded_buffer.get_device_buffer(index)
+    return pxla._set_aval(device_buffer)
 
   def block_until_ready(self):
-    for db in self._device_buffers:
-      db.block_until_ready()
+    self._sharded_buffer.block_until_ready()
     return self
 
   @classmethod
@@ -564,7 +574,8 @@ api_util._shaped_abstractify_handlers[GlobalDeviceArray] = \
 def _gda_shard_arg(x, devices, indices, mode):
   if mode == pxla.InputsHandlerMode.pmap:
     raise RuntimeError('GDA is not supported with pmap.')
-  return x._device_buffers
+  return x._sharded_buffer
+
 pxla.shard_arg_handlers[GlobalDeviceArray] = _gda_shard_arg
 
 

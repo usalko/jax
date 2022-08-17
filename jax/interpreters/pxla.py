@@ -402,7 +402,7 @@ def _shard_arg(arg, devices, arg_indices, mode):
 def shard_args(devices: Sequence[xb.xla_client.Device],
                indices: Sequence[Sequence[Index]],
                mode: InputsHandlerMode,
-               args) -> Sequence[Sequence[xb.xla_client.Buffer]]:
+               args) -> Sequence[Union[xb.xla_client.PyShardedBuffer, Sequence[xb.xla_client.Buffer]]]:
   """Shard each argument data array along its leading axis.
 
   Args:
@@ -418,6 +418,33 @@ def shard_args(devices: Sequence[xb.xla_client.Device],
     for each argument.
   """
   return [_shard_arg(arg, devices, indices[i], mode) for i, arg in enumerate(args)]
+
+@profiler.annotate_function
+def pjit_shard_args(devices: Sequence[xb.xla_client.Device],
+                    indices: Sequence[Sequence[Index]],
+                    args) -> Sequence[xb.xla_client.PyShardedBuffer]:
+  """Shard each argument data array along its leading axis.
+
+  Args:
+    devices: sequence of Devices mapping replica index to a physical device.
+    indices: sequence of the same length as `args` describing how each arg
+      should be sharded/replicated across `devices`. Each element in `indices`
+      is the same length as `devices`.
+    args: a sequence of JaxTypes representing arguments to be sharded according
+      to `indices` and placed on `devices`.
+
+  Returns:
+    A list of length matching args, containing lists of per-device buffers
+    for each argument.
+  """
+
+  def convert_to_py_sharded_buffer(arg):
+    if isinstance(arg, xc.PyShardedBuffer):
+      return arg
+    return xc.PyShardedBuffer.create_sharded_buffer(arg)
+
+  return [convert_to_py_sharded_buffer(_shard_arg(arg, devices, indices[i], InputsHandlerMode.pjit_or_xmap)) for i, arg in enumerate(args)]
+
 
 
 shard_arg_handlers: Dict[Any, Callable[[Any, Any, Any, InputsHandlerMode], Sequence[Any]]] = {}
@@ -565,13 +592,22 @@ def local_aval_to_result_handler(
     raise TypeError(
         f"No pxla_result_handler for type: {type(aval)}") from err
 
-PxlaResultHandler = Callable[..., Callable[[List[xb.xla_client.Buffer]], Any]]
+
+PxlaResultHandler = Callable[..., Callable[
+    [Union[List[xb.xla_client.Buffer], xb.xla_client.PyShardedBuffer]], Any]]
 local_result_handlers: Dict[Tuple[Type[core.AbstractValue], OutputType], PxlaResultHandler] = {}
 
 def sda_array_result_handler(aval: ShapedArray, sharding, indices):
   sharding_spec = _get_sharding_specs([sharding], [aval])[0]
-  return lambda bufs: make_sharded_device_array(aval, sharding_spec, bufs,
-                                                indices)
+
+  def make_sda(bufs):
+    if isinstance(bufs, xb.xla_client.PyShardedBuffer):
+      return make_sharded_device_array(aval, sharding_spec,
+                                       bufs.get_device_buffers(), indices)
+    return make_sharded_device_array(aval, sharding_spec, bufs, indices)
+
+  return make_sda
+
 local_result_handlers[(ShapedArray, OutputType.ShardedDeviceArray)] = sda_array_result_handler
 local_result_handlers[(ConcreteArray, OutputType.ShardedDeviceArray)] = sda_array_result_handler
 
@@ -1734,7 +1770,10 @@ class InputsHandler:
                "mode")
 
   def __init__(self, local_devices, in_shardings, input_indices, mode):
-    self.handler = partial(shard_args, local_devices, input_indices, mode)
+    if mode == InputsHandlerMode.pjit_or_xmap:
+      self.handler = partial(pjit_shard_args, local_devices, input_indices)
+    else:
+      self.handler = partial(shard_args, local_devices, input_indices, mode)
     self.local_devices = local_devices
     self.in_shardings = in_shardings
     self.input_indices = input_indices
@@ -1938,12 +1977,12 @@ class ExecuteReplicated:
       # TODO(sharadmv): simplify this logic when minimum jaxlib version is
       # bumped
       if can_execute_with_token:
-        out_bufs, runtime_tokens = (
+        out_bufs, sharded_token = (
             self.xla_executable.execute_sharded_on_local_devices_with_tokens(
               input_bufs))
-        for device, token in zip(
-          self.xla_executable.local_devices(), runtime_tokens):
-          dispatch.runtime_tokens.set_output_runtime_token(device, token)
+        for i, device in enumerate(self.xla_executable.local_devices()):
+          dispatch.runtime_tokens.set_output_runtime_token(
+              device, sharded_token.get_token(i))
       else:
         out_bufs = self.xla_executable.execute_sharded_on_local_devices(
             input_bufs)
@@ -1952,8 +1991,11 @@ class ExecuteReplicated:
           token = (token_bufs[i],)
           dispatch.runtime_tokens.set_output_token(device, token)
     else:
-      out_bufs = self.xla_executable.execute_sharded_on_local_devices(
-          input_bufs)
+      if self.in_handler.mode == InputsHandlerMode.pjit_or_xmap:
+        out_bufs, sharded_token = self.xla_executable.execute_sharded(input_bufs)
+      else:
+        out_bufs = self.xla_executable.execute_sharded_on_local_devices(
+            input_bufs)
     if dispatch.needs_check_special():
       for bufs in out_bufs:
         dispatch.check_special("parallel computation", bufs)
