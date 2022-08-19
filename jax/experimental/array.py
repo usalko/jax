@@ -102,7 +102,8 @@ class Array:
   # TODO(yashkatariya): Add __slots__ here.
 
   def __init__(self, aval: core.ShapedArray, sharding: Sharding,
-               arrays: Union[Sequence[DeviceArray], Sequence[Array]], committed: bool):
+               arrays: Union[Sequence[DeviceArray], Sequence[Array]],
+               committed: bool, _fastpath: bool = False):
     self.aval = aval
     self._sharding = sharding
     # Extract DeviceArrays from arrays with `SingleDeviceSharding` to keep the
@@ -115,17 +116,23 @@ class Array:
     # for what committed means.
     self._committed = committed
     self._npy_value = None
+    self._fastpath = _fastpath
 
     if config.jax_enable_checks:
       assert all(db.dtype == self.dtype for db in self._arrays), (
           "Input arrays to `Array` must have matching dtypes, "
           f"got: {[db.dtype for db in self._arrays]}")
 
-    # Rearrange arrays based on the device assignment.
-    if isinstance(sharding, XLACompatibleSharding):
-      device_to_buffer = {db.device().id: db for db in self._arrays}
-      self._arrays = [device_to_buffer[device.id]
-                      for device in self.sharding._addressable_device_assignment]
+    # Don't rearrange if fastpath is enabled because this assumes that the
+    # input buffers are already arranged properly. This usually happens when
+    # Array's are created as output of a JAX transformation
+    # (like pjit, xmap, etc).
+    if not self._fastpath:
+      # Rearrange arrays based on the device assignment.
+      if isinstance(sharding, XLACompatibleSharding):
+        device_to_buffer = {db.device().id: db for db in self._arrays}
+        self._arrays = [device_to_buffer[device.id]
+                        for device in self.sharding._addressable_device_assignment]
 
   @property
   def shape(self) -> Shape:
@@ -272,7 +279,8 @@ class Array:
       device = db.device()
       # Wrap the device arrays in `Array` until C++ returns an Array instead
       # of a DA.
-      array = Array(db.aval, SingleDeviceSharding(device), [db], committed=True)
+      array = Array(db.aval, SingleDeviceSharding(device), [db], committed=True,
+                    _fastpath=True)
       out.append(Shard(device, self.sharding, self.shape, array))
     return out
 
@@ -392,12 +400,14 @@ pxla.shard_arg_handlers[Array] = _array_shard_arg
 
 
 def _array_global_result_handler(global_aval, out_sharding):
-  return lambda bufs: Array(global_aval, out_sharding, bufs, committed=True)
+  return lambda bufs: Array(global_aval, out_sharding, bufs, committed=True,
+                            _fastpath=True)
 pxla.global_result_handlers[(core.ShapedArray, pxla.OutputType.Array)] = _array_global_result_handler
 pxla.global_result_handlers[(core.ConcreteArray, pxla.OutputType.Array)] = _array_global_result_handler
 
 
 def _array_local_result_handler(aval, sharding, indices):
-  return lambda bufs: Array(aval, sharding, bufs, committed=True)
+  return lambda bufs: Array(aval, sharding, bufs, committed=True,
+                            _fastpath=True)
 pxla.local_result_handlers[(core.ShapedArray, pxla.OutputType.Array)] = _array_local_result_handler
 pxla.local_result_handlers[(core.ConcreteArray, pxla.OutputType.Array)] = _array_local_result_handler
