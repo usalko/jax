@@ -224,6 +224,20 @@ class MultiDeviceTest(jtu.JaxTestCase):
     y = jax.device_put(1, devices[2]) + jnp.ones((2, 3))
     self.assert_committed_to_device(y, devices[2])
 
+  def test_single_input_committed_multi_output(self):
+    if jax.device_count() < 3:
+      self.skipTest("test requires 3 devices")
+    devices = self.get_devices()
+
+    @jax.jit
+    def f(a, b, c, d, e):
+      return a, b, c, d, e
+
+    outs = f(jax.device_put(1, devices[2]), jnp.array(2), jnp.array(3),
+             jnp.array(4), jnp.array(5))
+    for o in outs:
+      self.assert_committed_to_device(o, devices[2])
+
   def test_transpose(self):
     if jax.device_count() < 3:
       self.skipTest("test requires 3 devices")
