@@ -970,9 +970,9 @@ def compile_or_get_cached(backend, computation, compile_options,
   else:
     module_name = computation.name()
 
-  # Persistent compilation cache only implemented on TPU.
+  # Persistent compilation cache only implemented on TPU and GPU.
   # TODO(skye): add warning when initializing cache on unsupported default platform
-  if cc.is_initialized() and backend.platform == 'tpu':
+  if cc.is_initialized() and backend.platform in ["tpu", "gpu"]:
     cached_executable = cc.get_executable(computation, compile_options, backend)
     if cached_executable is not None:
       logging.info('Persistent compilation cache hit for %s.', module_name)
