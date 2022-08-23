@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import operator as op
 import numpy as np
-from typing import (Sequence, Tuple, Callable, Union, Optional, cast, List,
+from typing import (Any, Sequence, Tuple, Callable, Union, Optional, cast, List,
                     NamedTuple, Mapping)
 
 from jax import core
@@ -104,14 +104,42 @@ def _reconstruct_array(fun, args, arr_state, aval_state):
   jnp_value.aval = jnp_value.aval.update(**aval_state)
   return jnp_value
 
+# The methods we don't want to forward to C++ Array. It is initialized with a
+# few python internal methods.
+_use_cpp_method_list = ['__module__', '__dict__', '__doc__']
 
-class Array:
+def _use_cpp_array(cls):
+  """A helper decorator to replace Array with its C++ version"""
+
+  if xc._version < 92:
+    return cls
+
+  for attr in cls.__dict__:
+    if attr not in _use_cpp_method_list:
+      if attr in xc.Array.__dict__ or attr in ['__dict__', '__init__']:
+        raise AssertionError(f'Overriding {attr} that is already present in C++ Array')
+      setattr(xc.Array, attr, getattr(cls, attr))
+
+  return xc.Array
+
+def _use_cpp_method(f):
+  """A helper decorator to exclude methods from the set that are forwarded to C++ Array"""
+  _use_cpp_method_list.append(f.__name__)
+  return f
+
+_Array = Any
+
+@_use_cpp_array
+class Array: # type: ignore
   # TODO(yashkatariya): Add __slots__ here.
 
+  @_use_cpp_method
   def __init__(self, aval: core.ShapedArray, sharding: Sharding,
-               arrays: Union[Sequence[DeviceArray], Sequence[Array]],
+               arrays: Union[Sequence[DeviceArray], Sequence[_Array]],
                committed: bool, _skip_checks: bool = False,
                _fast_path_args: Optional[_ArrayFastPathArgs] = None):
+    # NOTE: the actual implementation of the constructor is moved to C++.
+
     self.aval = aval
     self._sharding = sharding
     # Extract DeviceArrays from arrays with `SingleDeviceSharding` to keep the
@@ -128,50 +156,55 @@ class Array:
     self._npy_value = None
 
     if not _skip_checks or config.jax_enable_checks:
-      ss = self.sharding.shard_shape(self.shape)
-      for db in self._arrays:
-        if db.shape != ss:
-          raise ValueError(
-              f"Expected shard shape {ss} doesn't match the buffer "
-              f"shape {db.shape} for buffer: {db}")
-
-    if not _skip_checks or config.jax_enable_checks:
-      for db in self._arrays:
-        if db.dtype != self.dtype:
-          raise ValueError(
-              "Input buffers to `Array` must have matching dtypes. "
-              f"Got {db.dtype}, expected {self.dtype} for buffer: {db}")
+      self._check()
 
     # Don't rearrange if skip_checks is enabled because this assumes that the
     # input buffers are already arranged properly. This usually happens when
     # Array's are created as output of a JAX transformation
     # (like pjit, xmap, etc).
     if not _skip_checks:
-      # Rearrange arrays based on the device assignment.
-      # TODO(yashkatariya): Add a similar check for shardings that are not
-      # XLACompatibleSharding. But leave the rearragement to XLACompatibleSharding
-      # only.
-      if isinstance(sharding, XLACompatibleSharding):
-        if self._fast_path_args is None:
-          addressable_da = self.sharding._addressable_device_assignment
-        else:
-          addressable_da = self._fast_path_args.addressable_device_assignment
-        if len(self._arrays) != len(addressable_da):
-          raise ValueError(
-              f"Expected {len(addressable_da)} per-device arrays "
-              "(this is how many devices are addressable by the sharding), but "
-              f"got {len(self._arrays)}")
-        device_to_buffer = {db.device().id: db for db in self._arrays}
-        try:
-          self._arrays = [device_to_buffer[device.id]
-                          for device in addressable_da]
-        except KeyError as e:
-          array_device_ids = set(a.device().id for a in self._arrays)
-          addressable_device_ids = set(d.id for d in addressable_da)
-          diff = set(array_device_ids) - set(addressable_device_ids)
-          raise ValueError(
-              f"Some per-device arrays are placed on devices {diff}, which are "
-              f"not used in the specified sharding {self.sharding}") from e
+      self._rearrange()
+
+  def _check(self):
+    ss = self._sharding.shard_shape(self.shape)
+    for db in self._arrays:
+      if db.shape != ss:
+        raise ValueError(
+            f"Expected shard shape {ss} doesn't match the buffer "
+            f"shape {db.shape} for buffer: {db}")
+
+    for db in self._arrays:
+      if db.dtype != self.dtype:
+        raise ValueError(
+            "Input buffers to `Array` must have matching dtypes. "
+            f"Got {db.dtype}, expected {self.dtype} for buffer: {db}")
+
+  def _rearrange(self):
+    # Rearrange arrays based on the device assignment.
+    # TODO(yashkatariya): Add a similar check for shardings that are not
+    # XLACompatibleSharding. But leave the rearragement to XLACompatibleSharding
+    # only.
+    if isinstance(self._sharding, XLACompatibleSharding):
+      if self._fast_path_args is None:
+        addressable_da = cast(XLACompatibleSharding, self._sharding)._addressable_device_assignment
+      else:
+        addressable_da = self._fast_path_args.addressable_device_assignment
+      if len(self._arrays) != len(addressable_da):
+        raise ValueError(
+            f"Expected {len(addressable_da)} per-device arrays "
+            "(this is how many devices are addressable by the sharding), but "
+            f"got {len(self._arrays)}")
+      device_to_buffer = {db.device().id: db for db in self._arrays}
+      try:
+        self._arrays = [device_to_buffer[device.id]
+                        for device in addressable_da]
+      except KeyError as e:
+        array_device_ids = set(a.device().id for a in self._arrays)
+        addressable_device_ids = set(d.id for d in addressable_da)
+        diff = set(array_device_ids) - set(addressable_device_ids)
+        raise ValueError(
+            f"Some per-device arrays are placed on devices {diff}, which are "
+            f"not used in the specified sharding {self.sharding}") from e
 
   @property
   def shape(self) -> Shape:
@@ -363,6 +396,7 @@ class Array:
     if self._arrays is None:
       raise RuntimeError("Array has been deleted.")
 
+  @_use_cpp_method
   def block_until_ready(self):
     self._check_if_deleted()
     for db in self._arrays:
@@ -418,7 +452,7 @@ setattr(Array, "__hash__", None)
 
 
 def make_array_from_callback(shape: Shape, sharding: Sharding,
-                             data_callback: Callable[[Optional[Index]], ArrayLike]) -> Array:
+                             data_callback: Callable[[Optional[Index]], ArrayLike]) -> _Array:
   device_to_index_map = sharding.devices_indices_map(shape)
   # Use addressable_devices here instead of `_addressable_device_assignment`
   # because `_addressable_device_assignment` is only available on
