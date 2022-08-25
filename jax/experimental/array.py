@@ -118,13 +118,18 @@ class Array:
     self._committed = committed
     self._npy_value = None
 
-    # TODO(yashkatariya): Add a check here which checks if the expected shard
-    # shape matches the shape of _arrays. A similar check exists for GDA.
+    if not _skip_checks or config.jax_enable_checks:
+      ss = self.sharding.shard_shape(self.shape)
+      if not all(db.shape == ss for db in self._arrays):
+        raise ValueError(
+            f"Expected shard shape {ss} doesn't match the buffer "
+            f"shape, got: {[db.shape for db in self._arrays]}")
 
     if not _skip_checks or config.jax_enable_checks:
-      assert all(db.dtype == self.dtype for db in self._arrays), (
-          "Input arrays to `Array` must have matching dtypes, "
-          f"got: {[db.dtype for db in self._arrays]}, aval type: {self.dtype}")
+      if not all(db.dtype == self.dtype for db in self._arrays):
+        raise ValueError(
+            "Input arrays to `Array` must have matching dtypes, "
+            f"got: {[db.dtype for db in self._arrays]}, aval type: {self.dtype}")
 
     # Don't rearrange if skip_checks is enabled because this assumes that the
     # input buffers are already arranged properly. This usually happens when

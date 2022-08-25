@@ -224,7 +224,7 @@ class JaxArrayTest(jtu.JaxTestCase):
       self.skipTest('Requires more than 4 devices')
     shape = (8, 2)
     mesh = jtu.create_global_mesh((1, 2), ('x', 'y'))
-    s = sharding.MeshPspecSharding(mesh, P('x', 'y'))
+    s = sharding.MeshPspecSharding(mesh, P('x'))
     inp_data = np.arange(prod(shape), dtype=np.float32).reshape(shape)
     bufs = [jax.device_put(inp_data, d) for d in jax.devices()[2:4]]
     with self.assertRaisesRegex(
@@ -232,6 +232,28 @@ class JaxArrayTest(jtu.JaxTestCase):
         "Some per-device arrays are placed on devices {2, 3}, which are "
         "not used in the specified sharding"):
       array.Array(jax.ShapedArray(shape, np.float32), s, bufs, committed=True)
+
+  @parameterized.named_parameters(
+      ("mesh_x_y", P("x", "y"), (2, 2)),
+      ("mesh_x", P("x"), (2, 4)),
+      ("mesh_y", P("y"), (4, 4)),
+      ("mesh_none_y", P(None, "y"), (8, 2)),
+      ("mesh_none_x", P(None, "x"), (8, 1)),
+      ("mesh_xy", P(("x", "y")), (1, 4)),
+  )
+  def test_shard_shape_mismatch_with_buffer_shape(self, pspec, expected_shard_shape):
+    shape = (8, 4)
+    mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
+    mps = sharding.MeshPspecSharding(mesh, pspec)
+    inp_data = np.arange(prod(shape)).reshape(shape)
+
+    str_expected_shard_shape = str(expected_shard_shape).replace(
+        r"(", r"\(").replace(r")", r"\)")
+    with self.assertRaisesRegex(
+        ValueError,
+        f"Expected shard shape {str_expected_shard_shape} doesn't match the "
+        "buffer shape"):
+      array.make_array_from_callback(shape, mps, lambda idx: inp_data)
 
 
 class ShardingTest(jtu.JaxTestCase):
@@ -269,6 +291,22 @@ class ShardingTest(jtu.JaxTestCase):
         list(mesh.devices.flat), mps._to_xla_op_sharding(len(shape)))
     self.assertDictEqual(
         ops.devices_indices_map(shape), mps.devices_indices_map(shape))
+
+  @parameterized.named_parameters(
+      ("mesh_x_y", P("x", "y"), (2, 2)),
+      ("mesh_x", P("x"), (2, 4)),
+      ("mesh_y", P("y"), (4, 4)),
+      ("mesh_none_y", P(None, "y"), (8, 2)),
+      ("mesh_none_x", P(None, "x"), (8, 1)),
+      ("mesh_xy", P(("x", "y")), (1, 4)),
+      ("mesh_fully_replicated", P(), (8, 4)),
+  )
+  def test_shard_shape(self, pspec, expected_shard_shape):
+    shape = (8, 4)
+    mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
+    mps = sharding.MeshPspecSharding(mesh, pspec)
+    self.assertEqual(mps.shard_shape(shape), expected_shard_shape)
+
 
 
 if __name__ == '__main__':
