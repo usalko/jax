@@ -1151,6 +1151,102 @@ class BCOOTest(jtu.JaxTestCase):
 
   @unittest.skipIf(not GPU_LOWERING_ENABLED, "test requires cusparse/hipsparse")
   @unittest.skipIf(jtu.device_under_test() != "gpu", "test requires GPU")
+  @parameterized.named_parameters(jtu.cases_from_list(
+      {"testcase_name":
+       "_n_batch={}_lhs_shape={}_rhs_shape={}_lhs_contracting={}_rhs_contracting={}"
+       .format(n_batch, jtu.format_shape_dtype_string(lhs_shape, dtype),
+               jtu.format_shape_dtype_string(rhs_shape, dtype),
+               lhs_contracting, rhs_contracting),
+       "n_batch": n_batch, "lhs_shape": lhs_shape, "rhs_shape": rhs_shape,
+       "dtype": dtype, "lhs_contracting": lhs_contracting,
+       "rhs_contracting": rhs_contracting}
+      for n_batch, lhs_shape, rhs_shape, lhs_contracting, rhs_contracting in [
+          # [1, (1, 2, 3), (3, 2), [2], [0]],
+          # [1, (1, 3, 2), (3, 2), [1], [0]],
+          # [1, (1, 3, 2), (4, 3), [1], [1]],
+          # [1, (4, 2, 3), (3, 5), [2], [0]],
+          [1, (4, 2, 3), (2, 5), [1], [0]],
+          # [1, (4, 2, 3), (5, 3), [2], [1]],
+      ]
+      # for dtype in jtu.dtypes.floating + jtu.dtypes.complex))
+      for dtype in [np.float32]))
+  @jtu.skip_on_devices("rocm")
+  def test_bcoo_batched_matmat_cusparse(
+    self, n_batch, lhs_shape, rhs_shape, dtype, lhs_contracting,
+    rhs_contracting):
+    rng = jtu.rand_small(self.rng())
+    rng_sparse = rand_sparse(self.rng())
+    def args_maker():
+      lhs = rng_sparse(lhs_shape, dtype)
+      rhs = rng(rhs_shape, dtype)
+      nse = int(sparse_bcoo._bcoo_nse(lhs, n_batch=n_batch, n_dense=0))
+      lhs_bcoo = sparse_bcoo.bcoo_fromdense(lhs, n_batch=n_batch, nse=nse,
+                                            index_dtype=jnp.int32)
+      return lhs_bcoo, lhs, rhs
+
+    dimension_numbers = ((lhs_contracting, rhs_contracting), ([], []))
+
+    def f_dense(lhs_bcoo, lhs, rhs):
+      return lax.dot_general(lhs, rhs, dimension_numbers=dimension_numbers)
+
+    def f_sparse(lhs_bcoo, lhs, rhs):
+      return sparse_bcoo.bcoo_dot_general(lhs_bcoo, rhs,
+                                          dimension_numbers=dimension_numbers)
+
+    # why presubmit fails????
+    lhs_bcoo, lhs, rhs = args_maker()
+    print('expected', f_dense(lhs_bcoo, lhs, rhs))
+    print('actual', jit(f_sparse)(lhs_bcoo, lhs, rhs))
+
+    # TODO(tianjianlu): In some cases, this fails python_should_be_executing check.
+    # self._CompileAndCheck(f_sparse, args_maker)
+    self._CheckAgainstNumpy(f_dense, f_sparse, args_maker)
+    self._CheckAgainstNumpy(f_dense, jit(f_sparse), args_maker)
+
+  @unittest.skipIf(not GPU_LOWERING_ENABLED, "test requires cusparse/hipsparse")
+  @unittest.skipIf(jtu.device_under_test() != "gpu", "test requires GPU")
+  @parameterized.named_parameters(jtu.cases_from_list(
+      {"testcase_name":
+       "_n_batch={}_lhs_shape={}_rhs_shape={}_lhs_contracting={}_rhs_contracting={}"
+       .format(n_batch, jtu.format_shape_dtype_string(lhs_shape, dtype),
+               jtu.format_shape_dtype_string(rhs_shape, dtype),
+               lhs_contracting, rhs_contracting),
+       "n_batch": n_batch, "lhs_shape": lhs_shape, "rhs_shape": rhs_shape,
+       "dtype": dtype, "lhs_contracting": lhs_contracting,
+       "rhs_contracting": rhs_contracting}
+      for n_batch, lhs_shape, rhs_shape, lhs_contracting, rhs_contracting in [
+          [1, (1, 2, 3), (3), [2], [0]],
+          [1, (1, 2), (3, 2), [1], [1]],
+      ]
+      for dtype in jtu.dtypes.floating + jtu.dtypes.complex))
+  @jtu.skip_on_devices("rocm")
+  def test_bcoo_batched_matmat_default_lowering(
+    self, n_batch, lhs_shape, rhs_shape, dtype, lhs_contracting,
+    rhs_contracting):
+    rng = jtu.rand_small(self.rng())
+    rng_sparse = rand_sparse(self.rng())
+    lhs = rng_sparse(lhs_shape, dtype)
+    rhs = rng(rhs_shape, dtype)
+    nse = int(sparse_bcoo._bcoo_nse(lhs, n_batch=n_batch, n_dense=0))
+    lhs_bcoo = sparse_bcoo.bcoo_fromdense(lhs, n_batch=n_batch, nse=nse,
+                                            index_dtype=jnp.int32)
+    dimension_numbers = ((lhs_contracting, rhs_contracting), ([], []))
+    matmat_expected = lax.dot_general(lhs, rhs,
+                                      dimension_numbers=dimension_numbers)
+    sp_matmat = jit(partial(sparse_bcoo.bcoo_dot_general,
+                            dimension_numbers=dimension_numbers))
+
+    if config.jax_bcoo_cusparse_lowering:
+      with self.assertWarnsRegex(
+          sparse.CuSparseEfficiencyWarning,
+          "bcoo_dot_general GPU lowering currently does not support "
+          "batch-mode matvec computation.*"):
+        matmat_default_lowering_fallback = sp_matmat(lhs_bcoo, rhs)
+
+    self.assertArraysEqual(matmat_expected, matmat_default_lowering_fallback)
+
+  @unittest.skipIf(not GPU_LOWERING_ENABLED, "test requires cusparse/hipsparse")
+  @unittest.skipIf(jtu.device_under_test() != "gpu", "test requires GPU")
   @jtu.skip_on_devices("rocm")  # TODO(rocm): see SWDEV-328107
   def test_bcoo_dot_general_oob_and_unsorted_indices_cusparse(self):
     """Tests bcoo dot general with out-of-bound and unsorted indices."""
